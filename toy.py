@@ -7,16 +7,17 @@ import ml_collections
 import optax
 import flax
 from flax.training import train_state
+from typing import Any
 
-# Import existing utils
+# Import existing utils from the repo
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 from agents.iql import IQLAgent  # Using the REPO'S IQL Agent
-from agents.am import AdjointMatchingAgent 
+from agents.am import AdjointMatchingAgent # Ensure agents/am.py is saved!
 
 # --- 1. A Simple Flow BC Agent (No One-Step, No Critic) ---
 class FlowBCAgent(flax.struct.PyTreeNode):
-    rng: 
+    rng: Any  # [FIXED] Added type hint
     network: Any
     config: Any = nonpytree_field()
 
@@ -77,7 +78,7 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         info['loss'] = info['loss'] # Keep consistent naming
         return self.replace(network=new_network, rng=new_rng), info
 
-# --- 2. Data & Viz (Same as before) ---
+# --- 2. Data & Viz ---
 def get_toy_dataset(n=4096):
     s_list, a_list, r_list, ns_list, d_list, m_list = [], [], [], [], [], []
     for _ in range(n):
@@ -104,7 +105,7 @@ def get_toy_dataset(n=4096):
         'masks': np.array(m_list, dtype=np.float32)
     }
 
-def plot_results(agent, title, is_flow=True):
+def plot_results(agent, title):
     rng = jax.random.PRNGKey(0)
     batch_size = 500
     obs = jnp.zeros((batch_size, 2))
@@ -172,7 +173,6 @@ def main():
         iql_agent, info = iql_agent.update(batch)
         
         if i % 1000 == 0:
-            # Correct keys for IQLAgent info
             print(f"Step {i} | V Loss: {info['value_loss']:.4f} | Q Loss: {info['critic_loss']:.4f}")
 
     # --- B. Train Base Flow Model (BC) ---
