@@ -6,5 +6,4 @@ ml_collections
 matplotlib
 moviepy
 wandb
-d4rl
 gymnasium == 0.29.1  # We can't use gymnasium >= 1.0.0 because it breaks d4rl.
