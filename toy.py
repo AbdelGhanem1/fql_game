@@ -9,11 +9,11 @@ import flax
 from flax.training import train_state
 from typing import Any
 
-# Import existing utils from the repo
+# Import modular agents
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 from agents.iql import IQLAgent
-from agents.am import AdjointMatchingAgent # Imports the corrected agent
+from agents.am import AdjointMatchingAgent
 
 # --- 1. Helper: Flow BC Agent (For Phase 2) ---
 class FlowBCAgent(flax.struct.PyTreeNode):
@@ -59,7 +59,6 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             x_t = (1 - t) * x_0 + t * x_1
             vel_target = x_1 - x_0
             
-            # Use select() to pick the specific module
             pred = self.network.select('actor_bc_flow')(
                 obs, x_t, t, params=params
             )
@@ -92,6 +91,40 @@ def get_toy_dataset(n=4096):
         'terminals': np.array(d_list, dtype=np.float32),
         'masks': np.array(m_list, dtype=np.float32)
     }
+
+def plot_critic_landscape(agent, title, filename):
+    """Plots the Q-value landscape for state [0,0]."""
+    print(f"Generating plot: {filename}...")
+    
+    # Create grid
+    resolution = 100
+    x = np.linspace(-2, 2, resolution)
+    y = np.linspace(-2, 2, resolution)
+    X, Y = np.meshgrid(x, y)
+    
+    # Flatten for batch processing
+    flat_actions = np.stack([X.ravel(), Y.ravel()], axis=1)
+    flat_obs = jnp.zeros((flat_actions.shape[0], 2)) # State is always [0,0]
+    
+    # Query Critic (Min of Q1, Q2)
+    q1, q2 = agent.network.select('target_critic')(flat_obs, actions=flat_actions)
+    min_q = jnp.minimum(q1, q2)
+    Z = np.array(min_q).reshape(X.shape)
+    
+    # Plot
+    plt.figure(figsize=(6, 5))
+    contour = plt.contourf(X, Y, Z, levels=50, cmap='viridis')
+    plt.colorbar(contour, label='Q-Value')
+    
+    # Add Goal Arrow (Green)
+    plt.arrow(0, 0, 1.8, 1.8, head_width=0.1, head_length=0.1, fc='white', ec='white', linewidth=2)
+    
+    plt.title(title)
+    plt.xlabel("Action X")
+    plt.ylabel("Action Y")
+    plt.savefig(filename)
+    plt.close()
+    print(f"Saved {filename}")
 
 def plot_results(agent, title, filename):
     print(f"Generating plot: {filename}...")
@@ -145,6 +178,9 @@ def main():
         iql_agent, info = iql_agent.update(batch)
         if i % 1000 == 0:
             print(f"Step {i} | V Loss: {info['value/value_loss']:.4f} | Q Loss: {info['critic/critic_loss']:.4f}")
+
+    # [NEW] Plot Critic Landscape
+    plot_critic_landscape(iql_agent, "IQL Critic Landscape (State [0,0])", "critic_landscape.png")
 
     # 2. Train Base Flow
     print("\nPhase 2: Training Base Flow Model (BC)...")
