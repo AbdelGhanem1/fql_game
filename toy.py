@@ -15,7 +15,7 @@ from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 from agents.iql import IQLAgent
 
-# --- 1. Flow BC Agent (Fixed to return tuple (loss, info)) ---
+# --- 1. Flow BC Agent ---
 class FlowBCAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
@@ -61,20 +61,17 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             x_t = (1 - t) * x_0 + t * x_1
             vel_target = x_1 - x_0
             
-            pred = self.network.apply(
-                {'params': params},
-                observations=obs,
-                actions=x_t,
-                times=t,
-                method=lambda m: m['actor_bc_flow'](obs, x_t, t)
+            # [FIX] Use select() instead of apply()
+            pred = self.network.select('actor_bc_flow')(
+                obs, x_t, t, params=params
             )
             loss = jnp.mean((pred - vel_target) ** 2)
-            return loss, {'loss': loss} # [CRITICAL FIX] Return tuple
+            return loss, {'loss': loss}
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
         return self.replace(network=new_network, rng=new_rng), info
 
-# --- 2. Adjoint Matching Agent (Included here to ensure correct Tuple return) ---
+# --- 2. Adjoint Matching Agent ---
 class AdjointMatchingAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
@@ -95,18 +92,15 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             )
         })
 
-        # Logic to handle different base agents
-        if hasattr(base_agent.network, 'params'):
-            params = base_agent.network.params
-            if 'modules_actor_bc_flow' in params:
-                base_params = params['modules_actor_bc_flow']
-            elif 'actor_bc_flow' in params: # Handle FlowBCAgent structure
-                base_params = params['actor_bc_flow']
-            else:
-                 # Fallback for simple dict structure
-                base_params = params
+        # Logic to handle different base agents params structure
+        params = base_agent.network.params
+        if 'modules_actor_bc_flow' in params:
+            base_params = params['modules_actor_bc_flow']
+        elif 'modules_flow_actor' in params:
+            base_params = params['modules_flow_actor']
         else:
-             raise ValueError("Unknown Base Agent Structure")
+             # Fallback: assume the dict itself is the params if simple
+             base_params = params.get('actor_bc_flow', params)
 
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
@@ -116,6 +110,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                                       actions=ex_actions[:1], 
                                       times=dummy_time)['params']
         
+        # Overwrite with base weights
         init_params['modules_student_policy'] = base_params
         network = TrainState.create(network_def, init_params, tx=network_tx)
 
@@ -124,24 +119,14 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
     def get_ode_drift(self, params, module_name, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
-        return self.network.apply(
-            {'params': params},
-            observations=observations, actions=actions, times=times,
-            method=lambda module: module[module_name](observations, actions, times)
-        )
+        # [FIX] Use select() with params argument
+        return self.network.select(module_name)(observations, actions, times, params=params)
     
     def get_base_drift(self, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
-        # Handle FlowBCAgent structure vs FQLAgent structure
-        if 'actor_bc_flow' in self.base_network.params:
-             return self.base_network.apply(
-                {'params': self.base_network.params},
-                observations=observations, actions=actions, times=times,
-                method=lambda m: m['actor_bc_flow'](observations, actions, times)
-            )
-        else:
-            return self.base_network.select('actor_bc_flow')(observations, actions, times)
+        # [FIX] Use select()
+        return self.base_network.select('actor_bc_flow')(observations, actions, times)
 
     @functools.partial(jax.jit, static_argnames=('n_steps',))
     def forward_sde(self, rng, observations, n_steps, dt):
@@ -155,7 +140,8 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             t_float = i / n_steps
             t_safe = t_float + dt
             
-            v_stud = self.get_ode_drift(self.network.params, 'modules_student_policy', observations, a_t, t_float)
+            # [FIX] Module name is 'student_policy', not 'modules_student_policy' for select()
+            v_stud = self.get_ode_drift(self.network.params, 'student_policy', observations, a_t, t_float)
             drift = 2 * v_stud - (a_t / t_safe)
             sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
             
@@ -221,11 +207,12 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         def loss_fn(params):
             def get_drift(i, x_t):
-                return self.get_ode_drift(params, 'modules_student_policy', observations, x_t, i / n_steps)
+                # [FIX] Use 'student_policy'
+                return self.get_ode_drift(params, 'student_policy', observations, x_t, i / n_steps)
             preds = jax.vmap(get_drift)(jnp.arange(n_steps), traj[:-1])
             sq_err = jnp.sum((preds - targets)**2, axis=-1)
             loss = jnp.mean(jnp.clip(sq_err, a_max=self.config['LCT']))
-            return loss, {'loss': loss} # [CRITICAL FIX] Return tuple
+            return loss, {'loss': loss}
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
         info['avg_reward'] = avg_rew
@@ -265,13 +252,10 @@ def plot_results(agent, title):
     for i in range(10):
         t = jnp.full((batch_size, 1), i/10)
         if isinstance(agent, FlowBCAgent):
-             v = agent.network.apply(
-                {'params': agent.network.params},
-                observations=obs, actions=x, times=t,
-                method=lambda m: m['actor_bc_flow'](obs, x, t)
-            )
+             # [FIX] Use select()
+             v = agent.network.select('actor_bc_flow')(obs, x, t)
         elif hasattr(agent, 'get_ode_drift'):
-             v = agent.get_ode_drift(agent.network.params, 'modules_student_policy', obs, x, i/10)
+             v = agent.get_ode_drift(agent.network.params, 'student_policy', obs, x, i/10)
         x = x + v * dt
     x = np.array(x)
     plt.figure(figsize=(5, 5))
@@ -303,7 +287,7 @@ def main():
         'expectile': 0.7, 
         'actor_loss': 'awr', 
         'alpha': 10.0,
-        'const_std': True, # Corrected Config
+        'const_std': True,
         'encoder': None
     })
     
@@ -314,7 +298,6 @@ def main():
         batch = {k: v[idxs] for k, v in dataset.items()}
         iql_agent, info = iql_agent.update(batch)
         if i % 1000 == 0:
-            # Corrected Keys
             print(f"Step {i} | V Loss: {info['value/value_loss']:.4f} | Q Loss: {info['critic/critic_loss']:.4f}")
 
     print("\nPhase 2: Training Base Flow Model (BC)...")
