@@ -156,7 +156,7 @@ def plot_results(agent, title, filename):
 
 # --- Main ---
 def main():
-    seed = 42
+    seed = 123
     dummy_obs = jnp.zeros((1, 2))
     dummy_act = jnp.zeros((1, 2))
     dataset = get_toy_dataset()
