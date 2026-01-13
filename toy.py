@@ -158,9 +158,10 @@ def main():
         'actor_layer_norm': False,
         'discount': 0.99,
         'tau': 0.005,
-        'expectile': 0.7, # Match your toy param
-        'actor_loss': 'awr', # Dummy, we won't use this actor
+        'expectile': 0.7, 
+        'actor_loss': 'awr', 
         'alpha': 10.0,
+        'const_std': True, # [FIX] Added missing config key
         'encoder': None
     })
     
