@@ -9,13 +9,13 @@ import flax
 from flax.training import train_state
 from typing import Any
 
-# Import modular agents
+# Import existing utils from the repo
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField
+from utils.networks import ActorVectorField, Value
 from agents.iql import IQLAgent
-from agents.am import AdjointMatchingAgent
+from agents.am import AdjointMatchingAgent # Imports the corrected agent
 
-# --- Helper: Simple Flow Agent for Phase 2 ---
+# --- 1. Helper: Flow BC Agent (For Phase 2) ---
 class FlowBCAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
@@ -59,7 +59,10 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             x_t = (1 - t) * x_0 + t * x_1
             vel_target = x_1 - x_0
             
-            pred = self.network.select('actor_bc_flow')(obs, x_t, t, params=params)
+            # Use select() to pick the specific module
+            pred = self.network.select('actor_bc_flow')(
+                obs, x_t, t, params=params
+            )
             loss = jnp.mean((pred - vel_target) ** 2)
             return loss, {'loss': loss}
 
@@ -114,7 +117,7 @@ def plot_results(agent, title, filename):
     plt.arrow(0, 0, 2, 2, head_width=0.1, color='red')
     plt.title(title)
     plt.grid()
-    plt.savefig(filename) # [FIX] Save instead of show
+    plt.savefig(filename)
     plt.close()
     print(f"Saved {filename}")
 

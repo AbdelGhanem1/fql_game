@@ -45,21 +45,20 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         })
 
         # 2. Extract Params from Base Agent
-        # Handle different base agent structures (FlowBCAgent vs FQLAgent)
         params = base_agent.network.params
         if 'modules_actor_bc_flow' in params:
             base_params = params['modules_actor_bc_flow']
         elif 'modules_flow_actor' in params:
             base_params = params['modules_flow_actor']
         else:
-            # Fallback for simple agents
+            # Fallback for simple agents (like FlowBCAgent)
             base_params = params.get('actor_bc_flow', params)
 
         # 3. Initialize Student with Dummy Data
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
         
-        # KEY FIX: Pass arguments keyed by module name
+        # Initialize with correct key 'student_policy'
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
         
@@ -79,7 +78,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
     def get_ode_drift(self, params, module_name, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
-        # KEY FIX: Use select() with params arg
+        # Use select() to properly handle TrainState wrapper
         return self.network.select(module_name)(observations, actions, times, params=params)
     
     def get_base_drift(self, observations, actions, t_scalar):
@@ -89,7 +88,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         if hasattr(self.base_network, 'select'):
              return self.base_network.select('actor_bc_flow')(observations, actions, times)
         else:
-             # Fallback for simple TrainState without select
+             # Fallback for simple TrainState without select (if used)
              return self.base_network.apply(
                 {'params': self.base_network.params},
                 observations=observations, actions=actions, times=times,
@@ -165,7 +164,8 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             vjp_total = jnp.clip(2 * term1_grads + term2_grads, -self.config['vjp_clip'], self.config['vjp_clip'])
             
             adjoint_next = adjoint + vjp_total * dt
-            target_v = v_base - (0.5 * sigma**2) * adjoint # sigma defined below in scope if needed, or recompute:
+            
+            # [FIXED] Define sigma BEFORE calculating target_v
             sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
             target_v = v_base - (0.5 * sigma**2) * adjoint
             
@@ -203,3 +203,19 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
         info['avg_reward'] = avg_rew
         return self.replace(network=new_network, rng=rng), info
+
+def get_config():
+    config = ml_collections.ConfigDict(dict(
+        agent_name='adjoint_matching',
+        lr=1e-4,
+        batch_size=256,
+        actor_hidden_dims=(512, 512, 512, 512),
+        actor_layer_norm=False,
+        am_steps=40,
+        reward_scale=1.0, 
+        LCT=10.0,
+        q_grad_clip=10.0,
+        vjp_clip=10.0,
+        action_dim=ml_collections.config_dict.placeholder(int),
+    ))
+    return config
