@@ -6,33 +6,58 @@ import matplotlib.pyplot as plt
 import ml_collections
 import optax
 import flax
+import flax.linen as nn
 import functools
 from flax.training import train_state
-from typing import Any
-import flax.linen as nn # Import nn to patch it
+from typing import Any, Sequence, Optional
 
-# --- [THE SABOTAGE] Force he_normal Init ---
-# We monkey-patch the default kernel_init of nn.Dense to be he_normal
-# This replicates the behavior of your "broken" toy code.
-print("!!! SABOTAGE MODE ENABLED: Forcing he_normal initialization !!!")
-original_dense = nn.Dense
-class SabotagedDense(original_dense):
-    def __init__(self, features, **kwargs):
-        # Force kernel_init to he_normal if not provided
-        if 'kernel_init' not in kwargs:
-            kwargs['kernel_init'] = nn.initializers.he_normal()
-        super().__init__(features, **kwargs)
-nn.Dense = SabotagedDense
-# -------------------------------------------
+# --- 1. Define Simple Critic (Matches your original Toy Code) ---
+class SimpleCritic(nn.Module):
+    hidden_dims: Sequence[int]
+    # We accept these args to match the Repo's signature, but ignore them
+    layer_norm: bool = False
+    num_ensembles: int = 2
+    encoder: Optional[nn.Module] = None
 
-# Import existing utils (Now they will use SabotagedDense)
+    @nn.compact
+    def __call__(self, observations: jnp.ndarray, actions: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+        # If actions provided, we are Q(s,a). If not, we are V(s).
+        if actions is not None:
+            inputs = jnp.concatenate([observations, actions], axis=-1)
+        else:
+            inputs = observations
+
+        # We create independent MLPs for each ensemble member (q1, q2)
+        outputs = []
+        for _ in range(self.num_ensembles):
+            x = inputs
+            # The exact architecture from your successful toy code
+            # Dense(256) -> ReLU -> Dense(256) -> ReLU -> Dense(1)
+            x = nn.Dense(256)(x)
+            x = nn.relu(x)
+            x = nn.Dense(256)(x)
+            x = nn.relu(x)
+            x = nn.Dense(1)(x)
+            outputs.append(x)
+            
+        # Match FQL Repo Output Format: (num_ensembles, batch)
+        if self.num_ensembles == 1:
+            return outputs[0].squeeze(-1)
+        return jnp.stack(outputs, axis=0).squeeze(-1)
+
+# --- 2. Monkey-Patching ---
+# We must swap the class BEFORE importing agents that use it
+import utils.networks
+print("!!! MONKEY-PATCHING: Replacing utils.networks.Value with SimpleCritic !!!")
+utils.networks.Value = SimpleCritic
+
+# Now import agents (they will use the patched class)
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, Value
+from utils.networks import ActorVectorField # Actor remains standard
 from agents.iql import IQLAgent
 
-# ... (Rest of the toy_v4.py code is identical) ...
+# --- 3. Agents (FlowBC & AM) ---
 
-# --- 1. Flow BC Agent ---
 class FlowBCAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
@@ -67,27 +92,22 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             obs = batch['observations']
             actions = batch['actions']
             batch_size = actions.shape[0]
-            
             rng_loc = jax.random.fold_in(rng, 0)
             rng_x, rng_t = jax.random.split(rng_loc)
             
             x_0 = jax.random.normal(rng_x, actions.shape)
             x_1 = actions
             t = jax.random.uniform(rng_t, (batch_size, 1))
-            
             x_t = (1 - t) * x_0 + t * x_1
             vel_target = x_1 - x_0
             
-            pred = self.network.select('actor_bc_flow')(
-                obs, x_t, t, params=params
-            )
+            pred = self.network.select('actor_bc_flow')(obs, x_t, t, params=params)
             loss = jnp.mean((pred - vel_target) ** 2)
             return loss, {'loss': loss}
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
         return self.replace(network=new_network, rng=new_rng), info
 
-# --- 2. Adjoint Matching Agent ---
 class AdjointMatchingAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
@@ -121,7 +141,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
-        
         init_params['modules_student_policy'] = base_params
         network = TrainState.create(network_def, init_params, tx=network_tx)
 
@@ -135,14 +154,14 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
     def get_base_drift(self, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
-        if 'actor_bc_flow' in self.base_network.params:
+        if hasattr(self.base_network, 'select'):
+             return self.base_network.select('actor_bc_flow')(observations, actions, times)
+        else:
              return self.base_network.apply(
                 {'params': self.base_network.params},
                 observations=observations, actions=actions, times=times,
                 method=lambda m: m['actor_bc_flow'](observations, actions, times)
             )
-        else:
-            return self.base_network.select('actor_bc_flow')(observations, actions, times)
 
     @functools.partial(jax.jit, static_argnames=('n_steps',))
     def forward_sde(self, rng, observations, n_steps, dt):
@@ -232,7 +251,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         info['avg_reward'] = avg_rew
         return self.replace(network=new_network, rng=rng), info
 
-# --- 3. Dataset & Plotting ---
+# --- 4. Main Script ---
 def get_toy_dataset(n=4096):
     s_list, a_list, r_list, ns_list, d_list, m_list = [], [], [], [], [], []
     for _ in range(n):
@@ -304,17 +323,16 @@ def plot_results(agent, title, filename):
     plt.close()
     print(f"Saved {filename}")
 
-# --- 4. Main ---
 def main():
     seed = 42
     dummy_obs = jnp.zeros((1, 2))
     dummy_act = jnp.zeros((1, 2))
     dataset = get_toy_dataset()
 
-    print("Phase 1: Training IQL Critic (Sabotaged Init)...")
+    print("Phase 1: Training IQL Critic (SimpleCritic)...")
     iql_config = ml_collections.ConfigDict({
         'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
-        'actor_hidden_dims': (64, 64), 'value_hidden_dims': (64, 64),
+        'actor_hidden_dims': (256, 256), 'value_hidden_dims': (256, 256),
         'layer_norm': False, 'actor_layer_norm': False,
         'discount': 0.99, 'tau': 0.005, 'expectile': 0.7, 
         'actor_loss': 'awr', 'alpha': 10.0, 'const_std': True, 'encoder': None
@@ -329,9 +347,9 @@ def main():
         if i % 1000 == 0:
             print(f"Step {i} | V Loss: {info['value/value_loss']:.4f} | Q Loss: {info['critic/critic_loss']:.4f}")
 
-    plot_critic_landscape(iql_agent, "IQL Critic (Sabotaged he_normal)", "critic_landscape_sabotaged.png")
+    plot_critic_landscape(iql_agent, "SimpleCritic Landscape", "critic_landscape_simple.png")
 
-    print("\nPhase 2: Training Base Flow Model (BC)...")
+    print("\nPhase 2: Training Base Flow Model...")
     bc_config = ml_collections.ConfigDict({'lr': 1e-3, 'hidden_dims': (64, 64)})
     bc_agent = FlowBCAgent.create(seed, dummy_obs, dummy_act, bc_config)
     
@@ -341,7 +359,7 @@ def main():
         bc_agent, info = bc_agent.update(batch)
         if i % 1000 == 0:
             print(f"Step {i} | Flow BC Loss: {info['loss']:.4f}")
-    plot_results(bc_agent, "Base BC Flow Policy", "results_base_sabotaged.png")
+    plot_results(bc_agent, "Base BC Policy", "results_base_simple.png")
 
     print("\nPhase 3: Adjoint Matching...")
     am_config = ml_collections.ConfigDict({
@@ -367,7 +385,7 @@ def main():
         if i % 200 == 0:
             print(f"Step {i} | AM Loss: {info['loss']:.4f} | Avg Reward: {info['avg_reward']:.2f}")
 
-    plot_results(am_agent, "Adjoint Matching Policy (Finetuned)", "results_finetuned_sabotaged.png")
+    plot_results(am_agent, "Adjoint Matching (Finetuned)", "results_finetuned_simple.png")
 
 if __name__ == "__main__":
     main()
