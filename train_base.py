@@ -6,8 +6,8 @@ import ml_collections
 from absl import app, flags
 from ml_collections import config_flags
 import tqdm
+import flax # Required for serialization
 
-# Use Repo's env utility
 from envs.env_utils import make_env_and_datasets 
 from utils.datasets import Dataset
 from agents.flow_bc import FlowBCAgent
@@ -29,7 +29,6 @@ if __name__ == '__main__':
             'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
             'actor_hidden_dims': (512, 512, 512, 512), 'actor_layer_norm': False,
             'flow_steps': 10, 'encoder': ml_collections.config_dict.placeholder(str),
-            # [FIX] Add placeholder for action_dim so the agent can set it
             'action_dim': ml_collections.config_dict.placeholder(int),
         })
         iql = ml_collections.ConfigDict({
@@ -69,8 +68,6 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     print(f"[Base Training] Creating Agents...")
     example_batch = train_dataset.sample(1)
     
-    # We must explicitly unlock the config if it came from flags, 
-    # but defining the placeholder above is the cleaner fix.
     flow_agent = FlowBCAgent.create(seed, example_batch['observations'], example_batch['actions'], config.flow)
     critic_agent = IQLAgent.create(seed, example_batch['observations'], example_batch['actions'], config.iql)
 
@@ -101,10 +98,11 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
                 best_agents['flow'] = flow_agent
                 best_agents['critic'] = critic_agent
                 
+                # [CRITICAL FIX] Save state_dict, not object
                 with open(os.path.join(save_dir, f'base_flow_{env_name}.pkl'), 'wb') as f:
-                    pickle.dump(flow_agent, f)
+                    pickle.dump(flax.serialization.to_state_dict(flow_agent), f)
                 with open(os.path.join(save_dir, f'base_critic_{env_name}.pkl'), 'wb') as f:
-                    pickle.dump(critic_agent, f)
+                    pickle.dump(flax.serialization.to_state_dict(critic_agent), f)
 
     return best_agents['flow'], best_agents['critic']
 
