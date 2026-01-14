@@ -75,22 +75,20 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     best_eval_score = -float('inf')
     best_agents = {'flow': flow_agent, 'critic': critic_agent}
     
-    # [FIX] Polished TQDM: Updates every 5 seconds to prevent spam
-    pbar = tqdm.tqdm(range(1, max_steps + 1), smoothing=0.1, desc="Base Training", mininterval=5.0, ncols=100)
-    
-    for i in pbar:
+    for i in tqdm.tqdm(range(1, max_steps + 1), smoothing=0.1, desc="Base Training"):
         batch = train_dataset.sample(config.flow.batch_size)
         
         flow_agent, flow_info = flow_agent.update(batch)
         critic_agent, critic_info = critic_agent.update(batch)
 
+        # Standard heartbeat logging (every 5000 steps)
         if i % 5000 == 0:
-            # Update description instead of printing a new line
-            pbar.set_description(f"Base Training (FlowL: {flow_info['loss']:.3f} | QL: {critic_info['critic/critic_loss']:.3f})")
+            print(f"Step {i} | Flow Loss: {flow_info['loss']:.4f} | Q: {critic_info['critic/critic_loss']:.4f}")
 
+        # Evaluation Block
         if i % eval_interval == 0:
-            # Clear current line to print eval cleanly
-            print(f"\n--- Eval Triggered at Step {i} ---")
+            # [FIX] Print training metrics right here for context
+            print(f"--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > Flow Loss: {flow_info['loss']:.4f} | Q Loss: {critic_info['critic/critic_loss']:.4f}")
             
             eval_score, _ = eval_policy(flow_agent, eval_env, 2)
@@ -100,7 +98,7 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
                 norm_score = eval_score
             
             print(f"    Eval Result   > Score: {norm_score:.2f}")
-            print(f"--------------------------------\n")
+            print(f"--------------------------------")
             
             if eval_score > best_eval_score:
                 best_eval_score = eval_score
