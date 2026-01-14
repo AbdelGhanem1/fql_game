@@ -8,12 +8,13 @@ from ml_collections import config_flags
 import tqdm
 import gym
 import d4rl
+import ogbench  # <--- CRITICAL FIX: Registers antsoccer envs
 
 from utils.datasets import Dataset
 from agents.flow_bc import FlowBCAgent
 from agents.iql import IQLAgent
 from agents.am import AdjointMatchingAgent, get_config as get_am_config
-from train_base import train_base_models, make_env, eval_policy # Import helpers
+from train_base import train_base_models, make_env, eval_policy
 
 FLAGS = flags.FLAGS
 
@@ -27,9 +28,7 @@ flags.DEFINE_integer('base_train_steps', 1000000, 'Steps for base training (if n
 flags.DEFINE_integer('eval_interval', 10000, 'Evaluation interval.')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of evaluation episodes.')
 
-# Configurations
 def get_full_config():
-    # Base Configs (for training from scratch)
     flow = ml_collections.ConfigDict({
         'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
         'actor_hidden_dims': (512, 512, 512, 512), 'actor_layer_norm': False,
@@ -38,12 +37,12 @@ def get_full_config():
     iql = ml_collections.ConfigDict({
         'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
         'actor_hidden_dims': (256, 256), 'value_hidden_dims': (256, 256),
-        'layer_norm': False, 'actor_layer_norm': False,
+        'layer_norm': True, 
+        'actor_layer_norm': False,
         'discount': 0.99, 'tau': 0.005, 'expectile': 0.7, 
         'actor_loss': 'awr', 'alpha': 10.0, 'const_std': True, 'encoder': None,
     })
     
-    # Adjoint Matching Config
     am = get_am_config()
     am.actor_hidden_dims = (512, 512, 512, 512)
     
@@ -74,7 +73,7 @@ def main(_):
             config=FLAGS.config,
             save_dir=FLAGS.save_dir,
             max_steps=FLAGS.base_train_steps,
-            eval_interval=50000 # Evaluate less often during pre-training
+            eval_interval=FLAGS.eval_interval
         )
         print("Base Training Complete. Proceeding to Finetuning.")
 
@@ -88,7 +87,6 @@ def main(_):
     
     example_batch = dataset.sample(1)
     
-    # Inject action_dim into AM config
     FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
     
     am_agent = AdjointMatchingAgent.create(
@@ -104,24 +102,28 @@ def main(_):
     print("Starting Adjoint Matching Finetuning...")
     best_am_score = -float('inf')
     
-    # We might want a baseline score first
-    base_score, _ = eval_policy(flow_agent, eval_env, 10)
-    print(f"Baseline (BC) Normalized Score: {env.get_normalized_score(base_score)*100:.2f}")
+    base_score, _ = eval_policy(flow_agent, eval_env, 2)
+    try:
+        norm_base = env.get_normalized_score(base_score) * 100.0
+    except:
+        norm_base = base_score
+    print(f"Baseline (BC) Normalized Score: {norm_base:.2f}")
 
     for i in tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc="AM Finetuning"):
         batch = dataset.sample(FLAGS.config.am.batch_size)
         
         am_agent, info = am_agent.update(batch)
         
-        # Logging
         if i % 1000 == 0:
             print(f"Step {i} | AM Loss: {info['loss']:.4f} | Avg Reward (Proxy): {info['avg_reward']:.2f}")
             
-        # Evaluation
         if i % FLAGS.eval_interval == 0:
             print("Evaluating AM Policy...")
             eval_score, eval_std = eval_policy(am_agent, eval_env, FLAGS.eval_episodes)
-            normalized_score = env.get_normalized_score(eval_score) * 100.0
+            try:
+                normalized_score = env.get_normalized_score(eval_score) * 100.0
+            except:
+                normalized_score = eval_score
             
             print(f"Step {i}: Raw Reward: {eval_score:.2f}, Normalized: {normalized_score:.2f}")
             

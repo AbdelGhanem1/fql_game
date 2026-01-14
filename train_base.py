@@ -8,6 +8,7 @@ from ml_collections import config_flags
 import tqdm
 import gym
 import d4rl
+import ogbench  # <--- CRITICAL FIX: Registers antsoccer envs
 
 from utils.datasets import Dataset
 from agents.flow_bc import FlowBCAgent
@@ -25,7 +26,6 @@ if __name__ == '__main__':
     flags.DEFINE_integer('eval_interval', 50000, 'Evaluation interval.')
     flags.DEFINE_integer('batch_size', 256, 'Batch size.')
     
-    # Config definition moved inside to avoid global scope issues
     def get_default_config():
         flow = ml_collections.ConfigDict({
             'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
@@ -35,7 +35,8 @@ if __name__ == '__main__':
         iql = ml_collections.ConfigDict({
             'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
             'actor_hidden_dims': (256, 256), 'value_hidden_dims': (256, 256),
-            'layer_norm': False, 'actor_layer_norm': False,
+            'layer_norm': True, # Reverting to True as per repo default just in case
+            'actor_layer_norm': False,
             'discount': 0.99, 'tau': 0.005, 'expectile': 0.7,
             'actor_loss': 'awr', 'alpha': 10.0, 'const_std': True,
             'encoder': ml_collections.config_dict.placeholder(str),
@@ -64,7 +65,6 @@ def eval_policy(agent, env, num_episodes=10):
         returns.append(total_reward)
     return np.mean(returns), np.std(returns)
 
-# --- CALLABLE FUNCTION FOR MAIN_AM.PY ---
 def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_interval=50000):
     os.makedirs(save_dir, exist_ok=True)
     
@@ -85,7 +85,6 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     print("[Base Training] Starting Loop...")
     best_eval_score = -float('inf')
     
-    # We use a mutable container for the best agents so we can return them
     best_agents = {'flow': flow_agent, 'critic': critic_agent}
     
     for i in tqdm.tqdm(range(1, max_steps + 1), smoothing=0.1, desc="Base Training"):
@@ -99,8 +98,13 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
                   f"Q: {critic_info['critic/critic_loss']:.4f}")
 
         if i % eval_interval == 0:
-            eval_score, _ = eval_policy(flow_agent, eval_env, 10)
-            norm_score = env.get_normalized_score(eval_score) * 100.0
+            eval_score, _ = eval_policy(flow_agent, eval_env, 2) # Reduced episodes for speed
+            # Handle envs without normalized score
+            try:
+                norm_score = env.get_normalized_score(eval_score) * 100.0
+            except AttributeError:
+                norm_score = eval_score
+            
             print(f"Step {i} Eval: {norm_score:.2f}")
             
             if eval_score > best_eval_score:
@@ -108,7 +112,6 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
                 best_agents['flow'] = flow_agent
                 best_agents['critic'] = critic_agent
                 
-                # Save just in case
                 with open(os.path.join(save_dir, f'base_flow_{env_name}.pkl'), 'wb') as f:
                     pickle.dump(flow_agent, f)
                 with open(os.path.join(save_dir, f'base_critic_{env_name}.pkl'), 'wb') as f:
@@ -117,7 +120,6 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     return best_agents['flow'], best_agents['critic']
 
 def main(_):
-    # Wrapper for running this script directly
     train_base_models(FLAGS.env_name, FLAGS.seed, FLAGS.config, FLAGS.save_dir, FLAGS.max_steps, FLAGS.eval_interval)
 
 if __name__ == '__main__':
