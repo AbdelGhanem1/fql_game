@@ -6,7 +6,7 @@ import ml_collections
 from absl import app, flags
 from ml_collections import config_flags
 import tqdm
-import flax # Required for serialization
+import flax 
 
 from envs.env_utils import make_env_and_datasets 
 from utils.datasets import Dataset
@@ -81,24 +81,30 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
         flow_agent, flow_info = flow_agent.update(batch)
         critic_agent, critic_info = critic_agent.update(batch)
 
+        # Standard heartbeat logging (every 5000 steps)
         if i % 5000 == 0:
             print(f"Step {i} | Flow Loss: {flow_info['loss']:.4f} | Q: {critic_info['critic/critic_loss']:.4f}")
 
+        # Evaluation Block
         if i % eval_interval == 0:
+            # [FIX] Print training metrics right here for context
+            print(f"--- Eval Triggered at Step {i} ---")
+            print(f"    Train Metrics > Flow Loss: {flow_info['loss']:.4f} | Q Loss: {critic_info['critic/critic_loss']:.4f}")
+            
             eval_score, _ = eval_policy(flow_agent, eval_env, 2)
             try:
                 norm_score = env.get_normalized_score(eval_score) * 100.0
             except AttributeError:
                 norm_score = eval_score
             
-            print(f"Step {i} Eval: {norm_score:.2f}")
+            print(f"    Eval Result   > Score: {norm_score:.2f}")
+            print(f"--------------------------------")
             
             if eval_score > best_eval_score:
                 best_eval_score = eval_score
                 best_agents['flow'] = flow_agent
                 best_agents['critic'] = critic_agent
                 
-                # [CRITICAL FIX] Save state_dict, not object
                 with open(os.path.join(save_dir, f'base_flow_{env_name}.pkl'), 'wb') as f:
                     pickle.dump(flax.serialization.to_state_dict(flow_agent), f)
                 with open(os.path.join(save_dir, f'base_critic_{env_name}.pkl'), 'wb') as f:

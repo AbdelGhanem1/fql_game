@@ -6,7 +6,7 @@ import ml_collections
 from absl import app, flags
 from ml_collections import config_flags
 import tqdm
-import flax # For serialization
+import flax 
 
 from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
@@ -51,7 +51,6 @@ def main(_):
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     
     # --- 1. ALWAYS Init Environment First ---
-    # We need example_batch to construct agents BEFORE loading weights
     print(f"Initializing {FLAGS.env_name}...")
     env, eval_env, train_dataset_dict, _ = make_env_and_datasets(FLAGS.env_name, frame_stack=None)
     train_dataset = Dataset.create(**train_dataset_dict)
@@ -64,24 +63,18 @@ def main(_):
     
     if has_pretrained:
         print(f"Loading Pretrained Agents from disk...")
-        
-        # 1. Create Fresh Agents (Structure)
         flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
         critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
         
-        # 2. Load Weights (State Dict)
         with open(FLAGS.pretrained_flow_path, 'rb') as f:
             flow_state = pickle.load(f)
             flow_agent = flax.serialization.from_state_dict(flow_agent, flow_state)
-            
         with open(FLAGS.pretrained_critic_path, 'rb') as f:
             critic_state = pickle.load(f)
             critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
-            
         print("Agents successfully restored.")
     else:
         print("Pretrained paths not provided. Triggering Base Training...")
-        # train_base_models returns fully trained agent objects
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
             seed=FLAGS.seed,
@@ -118,23 +111,28 @@ def main(_):
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
+        # Standard Heartbeat
         if i % 1000 == 0:
             print(f"Step {i} | AM Loss: {info['loss']:.4f} | Avg Reward (Proxy): {info['avg_reward']:.2f}")
             
+        # Eval Block (Synchronized)
         if i % FLAGS.eval_interval == 0:
-            print("Evaluating AM Policy...")
+            print(f"--- Eval Triggered at Step {i} ---")
+            print(f"    Train Metrics > AM Loss: {info['loss']:.4f} | Proxy Reward: {info['avg_reward']:.2f}")
+            
+            print("    Running Eval...")
             eval_score, _ = eval_policy(am_agent, eval_env, FLAGS.eval_episodes)
             try: normalized_score = env.get_normalized_score(eval_score) * 100.0
             except: normalized_score = eval_score
             
-            print(f"Step {i}: Score: {normalized_score:.2f}")
+            print(f"    Eval Result   > Score: {normalized_score:.2f}")
+            print(f"--------------------------------")
             
             if eval_score > best_am_score:
                 best_am_score = eval_score
-                # [FIX] Save state dict here too
                 with open(os.path.join(FLAGS.save_dir, f'am_finetuned_{FLAGS.env_name}.pkl'), 'wb') as f:
                     pickle.dump(flax.serialization.to_state_dict(am_agent), f)
-                print(f"Saved Best AM Model")
+                print(f"    Saved New Best Model")
 
 if __name__ == '__main__':
     app.run(main)
