@@ -7,8 +7,7 @@ from absl import app, flags
 from ml_collections import config_flags
 import tqdm
 
-# [FIX] Use Repo's env utility
-from envs.env_utils import make_env_and_datasets 
+from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
 from agents.flow_bc import FlowBCAgent
 from agents.iql import IQLAgent
@@ -32,6 +31,8 @@ def get_full_config():
         'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
         'actor_hidden_dims': (512, 512, 512, 512), 'actor_layer_norm': False,
         'flow_steps': 10, 'encoder': None,
+        # [FIX] Add placeholder for action_dim
+        'action_dim': ml_collections.config_dict.placeholder(int),
     })
     iql = ml_collections.ConfigDict({
         'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
@@ -72,7 +73,6 @@ def main(_):
     # --- 2. Initialize Adjoint Matching ---
     print(f"Initializing Adjoint Matching for {FLAGS.env_name}...")
     
-    # [FIX] Use make_env_and_datasets
     env, eval_env, train_dataset_dict, _ = make_env_and_datasets(FLAGS.env_name, frame_stack=None)
     train_dataset = Dataset.create(**train_dataset_dict)
     
@@ -102,7 +102,7 @@ def main(_):
         am_agent, info = am_agent.update(batch)
         
         if i % 1000 == 0:
-            print(f"Step {i} | AM Loss: {info['loss']:.4f} | Avg Reward: {info['avg_reward']:.2f}")
+            print(f"Step {i} | AM Loss: {info['loss']:.4f} | Avg Reward (Proxy): {info['avg_reward']:.2f}")
             
         if i % FLAGS.eval_interval == 0:
             print("Evaluating AM Policy...")

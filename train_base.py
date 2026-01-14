@@ -7,7 +7,7 @@ from absl import app, flags
 from ml_collections import config_flags
 import tqdm
 
-# [FIX] Use Repo's env utility instead of raw gym/d4rl
+# Use Repo's env utility
 from envs.env_utils import make_env_and_datasets 
 from utils.datasets import Dataset
 from agents.flow_bc import FlowBCAgent
@@ -15,7 +15,6 @@ from agents.iql import IQLAgent
 
 FLAGS = flags.FLAGS
 if __name__ == '__main__':
-    # Standard flags matching main.py structure where possible
     flags.DEFINE_string('env_name', 'halfcheetah-medium-v2', 'Environment name.')
     flags.DEFINE_string('save_dir', './saved_models/', 'Directory to save checkpoints.')
     flags.DEFINE_integer('seed', 42, 'Random seed.')
@@ -24,13 +23,14 @@ if __name__ == '__main__':
     flags.DEFINE_integer('log_interval', 5000, 'Log interval.')
     flags.DEFINE_integer('eval_interval', 50000, 'Evaluation interval.')
     flags.DEFINE_integer('batch_size', 256, 'Batch size.')
-    flags.DEFINE_integer('frame_stack', None, 'Number of frames to stack (for visual envs).')
 
     def get_default_config():
         flow = ml_collections.ConfigDict({
             'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
             'actor_hidden_dims': (512, 512, 512, 512), 'actor_layer_norm': False,
             'flow_steps': 10, 'encoder': ml_collections.config_dict.placeholder(str),
+            # [FIX] Add placeholder for action_dim so the agent can set it
+            'action_dim': ml_collections.config_dict.placeholder(int),
         })
         iql = ml_collections.ConfigDict({
             'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
@@ -47,14 +47,12 @@ if __name__ == '__main__':
 def eval_policy(agent, env, num_episodes=10):
     returns = []
     for _ in range(num_episodes):
-        obs, _ = env.reset() # gym>=0.26 returns (obs, info)
+        obs, _ = env.reset()
         done = False
         total_reward = 0
         while not done:
             action = agent.sample_actions(obs[None, :], seed=jax.random.PRNGKey(0))
             action = np.array(action[0])
-            
-            # gym>=0.26 step returns 5 values
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total_reward += reward
@@ -64,21 +62,18 @@ def eval_policy(agent, env, num_episodes=10):
 def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_interval=50000):
     os.makedirs(save_dir, exist_ok=True)
     
-    # 1. Setup using Repo Utility
-    print(f"[Base Training] Initializing Environment: {env_name}...")
-    # make_env_and_datasets handles registration, d4rl/ogbench loading, and stacking
+    print(f"[Base Training] Initializing {env_name}...")
     env, eval_env, train_dataset_dict, val_dataset = make_env_and_datasets(env_name, frame_stack=None)
-    
-    # Convert dictionary to Repo's Dataset class
     train_dataset = Dataset.create(**train_dataset_dict)
     
-    # 2. Init Agents
+    print(f"[Base Training] Creating Agents...")
     example_batch = train_dataset.sample(1)
     
+    # We must explicitly unlock the config if it came from flags, 
+    # but defining the placeholder above is the cleaner fix.
     flow_agent = FlowBCAgent.create(seed, example_batch['observations'], example_batch['actions'], config.flow)
     critic_agent = IQLAgent.create(seed, example_batch['observations'], example_batch['actions'], config.iql)
 
-    # 3. Training Loop
     print("[Base Training] Starting Loop...")
     best_eval_score = -float('inf')
     best_agents = {'flow': flow_agent, 'critic': critic_agent}
