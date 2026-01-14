@@ -51,14 +51,12 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         elif 'modules_flow_actor' in params:
             base_params = params['modules_flow_actor']
         else:
-            # Fallback for simple agents (like FlowBCAgent)
             base_params = params.get('actor_bc_flow', params)
 
         # 3. Initialize Student with Dummy Data
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
         
-        # Initialize with correct key 'student_policy'
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
         
@@ -73,12 +71,47 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                    critic_agent=critic_agent, 
                    config=flax.core.FrozenDict(**config))
 
+    # --- Inference ---
+
+    @jax.jit
+    def sample_actions(self, observations, seed=None):
+        """
+        Sample actions by solving the ODE (Euler method) using the Student Policy.
+        Required for eval_policy.
+        """
+        batch_size = observations.shape[0]
+        action_dim = self.config['action_dim']
+        
+        if seed is None:
+            seed = jax.random.PRNGKey(0)
+            
+        # 1. Sample Noise x_0
+        actions = jax.random.normal(seed, (batch_size, action_dim))
+        
+        # 2. Integration
+        # Use 'am_steps' from config for inference precision
+        steps = self.config.get('am_steps', 10) 
+        dt = 1.0 / steps
+        
+        def body_fn(i, val):
+            curr_actions = val
+            t = jnp.full((batch_size, 1), i * dt)
+            
+            # Predict velocity using the trained student_policy
+            vel = self.network.select('student_policy')(
+                observations, curr_actions, t, params=self.network.params
+            )
+            return curr_actions + vel * dt
+
+        actions = jax.lax.fori_loop(0, steps, body_fn, actions)
+        
+        return jnp.clip(actions, -1, 1)
+
     # --- Helpers ---
 
     def get_ode_drift(self, params, module_name, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
-        # Use select() to properly handle TrainState wrapper
         return self.network.select(module_name)(observations, actions, times, params=params)
     
     def get_base_drift(self, observations, actions, t_scalar):
@@ -88,7 +121,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         if hasattr(self.base_network, 'select'):
              return self.base_network.select('actor_bc_flow')(observations, actions, times)
         else:
-             # Fallback for simple TrainState without select (if used)
              return self.base_network.apply(
                 {'params': self.base_network.params},
                 observations=observations, actions=actions, times=times,
@@ -110,10 +142,8 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             t_float = i / n_steps
             t_safe = t_float + dt
             
-            # Student Drift
             v_stud = self.get_ode_drift(self.network.params, 'student_policy', observations, a_t, t_float)
             
-            # SDE Physics: 2*v - x/t
             drift = 2 * v_stud - (a_t / t_safe)
             sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
             
@@ -165,7 +195,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             adjoint_next = adjoint + vjp_total * dt
             
-            # [FIXED] Define sigma BEFORE calculating target_v
             sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
             target_v = v_base - (0.5 * sigma**2) * adjoint
             
