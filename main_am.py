@@ -1,5 +1,6 @@
 import os
 import pickle
+import random
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -8,7 +9,7 @@ from absl import app, flags
 from ml_collections import config_flags
 import tqdm
 import flax 
-import wandb # <--- ADDED
+import wandb
 
 from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
@@ -28,21 +29,21 @@ flags.DEFINE_string('pretrained_critic_path', '', 'Path to pretrained IQL agent.
 flags.DEFINE_integer('seed', 42, 'Random seed.')
 
 # Training Steps
-flags.DEFINE_integer('am_steps', 200000, 'Number of AM finetuning steps.')
-flags.DEFINE_integer('base_train_steps', 1000000, 'Steps for base training (if needed).')
+flags.DEFINE_integer('am_steps', 10000, 'Number of AM finetuning steps.')
+flags.DEFINE_integer('base_train_steps', 100000, 'Steps for base training.')
 
-# Evaluation Settings
-flags.DEFINE_integer('eval_interval', 50000, 'Interval for Base Training evaluation.')
-flags.DEFINE_integer('am_eval_interval', 5000, 'Interval for AM Finetuning evaluation.')
+# Evaluation Intervals
+flags.DEFINE_integer('eval_interval', 10000, 'Interval for Base Training evaluation.')
+flags.DEFINE_integer('am_eval_interval', 500, 'Interval for AM Finetuning evaluation.')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of evaluation episodes.')
-flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
+flags.DEFINE_float('eval_temperature', 0.0, 'Temperature for evaluation.')
 
 # AM Hyperparameters
 flags.DEFINE_float('reward_scale', 1.0, 'Scale of the Q-guidance signal.')
 flags.DEFINE_float('q_grad_clip', 10.0, 'Clip value for the gradient of the Q-function.')
 flags.DEFINE_float('LCT', 10.0, 'Large Deviation Truncation threshold for loss.')
 flags.DEFINE_float('vjp_clip', 10.0, 'Clip value for the vector-Jacobian product in adjoint.')
-flags.DEFINE_integer('ode_steps', 40, 'Number of ODE steps for AM training and inference.')
+flags.DEFINE_integer('ode_steps', 20, 'Number of ODE steps for AM training and inference.')
 
 def get_full_config():
     flow = ml_collections.ConfigDict({
@@ -64,36 +65,53 @@ def get_full_config():
 
 config_flags.DEFINE_config_dict('config', get_full_config(), 'Full configuration.')
 
+def set_global_seed(seed):
+    np.random.seed(seed)
+    random.seed(seed)
+    # JAX seeding is handled by passing the key, but we set python/numpy for dataloaders
+
 def main(_):
+    # Ensure full reproducibility
+    set_global_seed(FLAGS.seed)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     
-    # --- 0. INIT WANDB ---
-    # We expect WANDB_PROJECT and WANDB_NAME to be set via env vars in the bash command
+    # Init WandB (expecting env vars for grouping)
     wandb.init(config=FLAGS.config.to_dict())
     
     # --- 1. Init Environment ---
-    print(f"Initializing {FLAGS.env_name}...")
+    # make_env_and_datasets uses np.random, so global seed helps here
     env, eval_env, train_dataset_dict, _ = make_env_and_datasets(FLAGS.env_name, frame_stack=None)
     train_dataset = Dataset.create(**train_dataset_dict)
     example_batch = train_dataset.sample(1)
     
-    # --- 2. Load Pretrained Agents ---
+    # --- 2. Base Training (or Load) ---
     flow_agent = None
     critic_agent = None
     
-    if FLAGS.pretrained_flow_path and FLAGS.pretrained_critic_path:
-        print(f"Loading Agents...")
-        flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
-        critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
-        
+    # Check if we need to train from scratch (for the full experiment)
+    if FLAGS.pretrained_flow_path == '':
+        print(f"[Seed {FLAGS.seed}] Starting Base Training (100k steps)...")
+        flow_agent, critic_agent = train_base_models(
+            env_name=FLAGS.env_name,
+            seed=FLAGS.seed,
+            config=FLAGS.config,
+            save_dir=FLAGS.save_dir,
+            max_steps=FLAGS.base_train_steps,
+            eval_interval=FLAGS.eval_interval,
+            eval_episodes=FLAGS.eval_episodes,
+            eval_temperature=FLAGS.eval_temperature 
+        )
+        print("Base Training Complete. Transitioning to Finetuning...")
+    else:
+        # Fallback if you want to skip base training (not used in this experiment)
         with open(FLAGS.pretrained_flow_path, 'rb') as f:
             flow_state = pickle.load(f)
+            flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
             flow_agent = flax.serialization.from_state_dict(flow_agent, flow_state)
         with open(FLAGS.pretrained_critic_path, 'rb') as f:
             critic_state = pickle.load(f)
+            critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
             critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
-    else:
-        raise ValueError("For ablation, please provide pretrained paths!")
 
     # --- 3. Initialize Adjoint Matching ---
     FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
@@ -115,6 +133,7 @@ def main(_):
     # --- 4. Setup Fixed Batch Monitor ---
     monitor_batch = train_dataset.sample(32)
     monitor_obs = monitor_batch['observations']
+    # Use deterministic sampling for baseline
     base_actions = flow_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
     q1_base, q2_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
     mean_base_q = jnp.mean(jnp.minimum(q1_base, q2_base))
@@ -122,18 +141,17 @@ def main(_):
     wandb.log({"monitor/baseline_q": mean_base_q})
 
     # --- 5. Finetuning Loop ---
-    print(f"Starting AM Finetuning (Scale: {FLAGS.reward_scale})...")
-    best_am_score = -float('inf')
+    print(f"[Seed {FLAGS.seed}] Starting AM Finetuning (Scale: {FLAGS.reward_scale}, 10k steps)...")
     
-    # Progress bar only!
-    pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc=f"AM (Scale {FLAGS.reward_scale})", mininterval=5.0, ncols=100)
+    # Progress bar
+    pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc=f"AM-Scale-{FLAGS.reward_scale}-Seed-{FLAGS.seed}", mininterval=5.0, ncols=100)
 
     for i in pbar:
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
-        # --- Monitor Logic (Every 1000 steps) ---
-        if i % 1000 == 0:
+        # Monitor every 500 steps (matches eval interval)
+        if i % 500 == 0:
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
             q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
             mean_curr_q = jnp.mean(jnp.minimum(q1_curr, q2_curr))
@@ -141,20 +159,14 @@ def main(_):
             q_improvement = mean_curr_q - mean_base_q
             action_drift = jnp.mean(jnp.linalg.norm(current_actions - base_actions, axis=-1))
             
-            # Log to WandB
             wandb.log({
-                "train/loss": info['loss'],
-                "train/proxy_reward": info['avg_reward'],
+                "am/loss": info['loss'],
                 "monitor/delta_q": q_improvement,
                 "monitor/action_drift": action_drift,
-                "monitor/mean_q": mean_curr_q,
-                "step": i
+                "am_step": i
             })
-
-            # Update Pbar (Keep it minimal)
-            pbar.set_description(f"AM (L:{info['loss']:.2f}|dQ:{q_improvement:+.2f}|Dr:{action_drift:.2f})")
             
-        # --- Evaluation Logic ---
+        # Evaluation Logic (Every 500 steps)
         if i % FLAGS.am_eval_interval == 0:
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
             eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
@@ -162,23 +174,13 @@ def main(_):
             try: normalized_score = env.unwrapped.get_normalized_score(eval_score) * 100.0
             except: normalized_score = eval_score
             
-            # Log Eval to WandB
             wandb.log({
-                "eval/raw_score": eval_score,
-                "eval/norm_score": normalized_score,
-                "step": i
+                "am/raw_score": eval_score,
+                "am/norm_score": normalized_score,
+                "am_step": i
             })
             
-            # Minimal Print (Optional, can rely purely on WandB)
-            # tqdm.tqdm.write(f"Step {i}: Score {normalized_score:.2f}")
-
-            if eval_score > best_am_score:
-                best_am_score = eval_score
-                # Only save if explicitly needed, usually ablation doesn't need heavy saving
-                # or save with scale in name
-                save_path = os.path.join(FLAGS.save_dir, f'am_pen_{FLAGS.reward_scale}_best.pkl')
-                with open(save_path, 'wb') as f:
-                    pickle.dump(flax.serialization.to_state_dict(am_agent), f)
+            pbar.set_description(f"AM (Drift:{action_drift:.2f}|Score:{normalized_score:.1f})")
 
 if __name__ == '__main__':
     app.run(main)
