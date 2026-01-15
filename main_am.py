@@ -10,10 +10,12 @@ import flax
 
 from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
+# [FIX] Use Repo's evaluation utility
+from utils.evaluation import evaluate
 from agents.flow_bc import FlowBCAgent
 from agents.iql import IQLAgent
 from agents.am import AdjointMatchingAgent, get_config as get_am_config
-from train_base import train_base_models, eval_policy
+from train_base import train_base_models
 
 FLAGS = flags.FLAGS
 
@@ -81,7 +83,8 @@ def main(_):
             config=FLAGS.config,
             save_dir=FLAGS.save_dir,
             max_steps=FLAGS.base_train_steps,
-            eval_interval=FLAGS.eval_interval
+            eval_interval=FLAGS.eval_interval,
+            eval_episodes=FLAGS.eval_episodes
         )
 
     # --- 2. Initialize Adjoint Matching ---
@@ -102,31 +105,36 @@ def main(_):
     best_am_score = -float('inf')
     
     # Baseline Eval
-    base_score, _ = eval_policy(flow_agent, eval_env, 2)
-    try: norm_base = env.get_normalized_score(base_score) * 100.0
-    except: norm_base = base_score
+    # [FIX] Use repo's evaluate()
+    metrics, _, _ = evaluate(flow_agent, eval_env, num_eval_episodes=2)
+    base_raw = metrics.get('evaluation/return', -1000)
+    try: norm_base = env.get_normalized_score(base_raw) * 100.0
+    except: norm_base = base_raw
     print(f"Baseline (BC) Normalized Score: {norm_base:.2f}")
 
-    for i in tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc="AM Finetuning"):
+    pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc="AM Finetuning", mininterval=5.0, ncols=100)
+
+    for i in pbar:
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
-        # Standard Heartbeat
         if i % 1000 == 0:
-            print(f"Step {i} | AM Loss: {info['loss']:.4f} | Avg Reward (Proxy): {info['avg_reward']:.2f}")
+            pbar.set_description(f"AM Finetuning (Loss: {info['loss']:.4f} | Rew: {info['avg_reward']:.2f})")
             
-        # Eval Block (Synchronized)
         if i % FLAGS.eval_interval == 0:
-            print(f"--- Eval Triggered at Step {i} ---")
+            print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > AM Loss: {info['loss']:.4f} | Proxy Reward: {info['avg_reward']:.2f}")
-            
             print("    Running Eval...")
-            eval_score, _ = eval_policy(am_agent, eval_env, FLAGS.eval_episodes)
+            
+            # [FIX] Use repo's evaluate()
+            metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes)
+            eval_score = metrics.get('evaluation/return', -1000)
+            
             try: normalized_score = env.get_normalized_score(eval_score) * 100.0
             except: normalized_score = eval_score
             
-            print(f"    Eval Result   > Score: {normalized_score:.2f}")
-            print(f"--------------------------------")
+            print(f"    Eval Result   > Raw: {eval_score:.2f} | Norm: {normalized_score:.2f}")
+            print(f"--------------------------------\n")
             
             if eval_score > best_am_score:
                 best_am_score = eval_score

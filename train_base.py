@@ -10,6 +10,8 @@ import flax
 
 from envs.env_utils import make_env_and_datasets 
 from utils.datasets import Dataset
+# [FIX] Use Repo's evaluation utility
+from utils.evaluation import evaluate
 from agents.flow_bc import FlowBCAgent
 from agents.iql import IQLAgent
 
@@ -43,22 +45,7 @@ if __name__ == '__main__':
 
     config_flags.DEFINE_config_dict('config', get_default_config(), 'Combined configuration.')
 
-def eval_policy(agent, env, num_episodes=10):
-    returns = []
-    for _ in range(num_episodes):
-        obs, _ = env.reset()
-        done = False
-        total_reward = 0
-        while not done:
-            action = agent.sample_actions(obs[None, :], seed=jax.random.PRNGKey(0))
-            action = np.array(action[0])
-            obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            total_reward += reward
-        returns.append(total_reward)
-    return np.mean(returns), np.std(returns)
-
-def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_interval=50000):
+def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_interval=50000, eval_episodes=10):
     os.makedirs(save_dir, exist_ok=True)
     
     print(f"[Base Training] Initializing {env_name}...")
@@ -75,33 +62,48 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     best_eval_score = -float('inf')
     best_agents = {'flow': flow_agent, 'critic': critic_agent}
     
-    for i in tqdm.tqdm(range(1, max_steps + 1), smoothing=0.1, desc="Base Training"):
+    pbar = tqdm.tqdm(range(1, max_steps + 1), smoothing=0.1, desc="Base Training", mininterval=5.0, ncols=100)
+    
+    for i in pbar:
         batch = train_dataset.sample(config.flow.batch_size)
         
         flow_agent, flow_info = flow_agent.update(batch)
         critic_agent, critic_info = critic_agent.update(batch)
 
-        # Standard heartbeat logging (every 5000 steps)
         if i % 5000 == 0:
-            print(f"Step {i} | Flow Loss: {flow_info['loss']:.4f} | Q: {critic_info['critic/critic_loss']:.4f}")
+            pbar.set_description(f"Base Training (FlowL: {flow_info['loss']:.3f} | QL: {critic_info['critic/critic_loss']:.3f})")
 
-        # Evaluation Block
         if i % eval_interval == 0:
-            # [FIX] Print training metrics right here for context
-            print(f"--- Eval Triggered at Step {i} ---")
+            print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > Flow Loss: {flow_info['loss']:.4f} | Q Loss: {critic_info['critic/critic_loss']:.4f}")
             
-            eval_score, _ = eval_policy(flow_agent, eval_env, 2)
+            # [FIX] Use repo's evaluate()
+            # It returns (metrics_dict, trajectories, renders)
+            eval_metrics, _, _ = evaluate(
+                agent=flow_agent,
+                env=eval_env,
+                config=config.flow, # Pass config if needed by wrapper
+                num_eval_episodes=eval_episodes
+            )
+            
+            # Extract score from metrics dict (repo usually puts 'evaluation/return' or similar)
+            # But usually we check for normalized score
+            # The repo's evaluate() calculates stats but 'normalized score' might still need manual retrieval 
+            # if not in the dict. However, standard D4RL eval puts normalized score in there?
+            # Let's check keys: usually 'evaluation/return' is raw return.
+            
+            raw_return = eval_metrics.get('evaluation/return', -1000)
+            
             try:
-                norm_score = env.get_normalized_score(eval_score) * 100.0
+                norm_score = env.get_normalized_score(raw_return) * 100.0
             except AttributeError:
-                norm_score = eval_score
+                norm_score = raw_return
             
-            print(f"    Eval Result   > Score: {norm_score:.2f}")
-            print(f"--------------------------------")
+            print(f"    Eval Result   > Raw: {raw_return:.2f} | Norm: {norm_score:.2f}")
+            print(f"--------------------------------\n")
             
-            if eval_score > best_eval_score:
-                best_eval_score = eval_score
+            if raw_return > best_eval_score:
+                best_eval_score = raw_return
                 best_agents['flow'] = flow_agent
                 best_agents['critic'] = critic_agent
                 
@@ -113,7 +115,7 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     return best_agents['flow'], best_agents['critic']
 
 def main(_):
-    train_base_models(FLAGS.env_name, FLAGS.seed, FLAGS.config, FLAGS.save_dir, FLAGS.max_steps, FLAGS.eval_interval)
+    train_base_models(FLAGS.env_name, FLAGS.seed, FLAGS.config, FLAGS.save_dir, FLAGS.max_steps, FLAGS.eval_interval, FLAGS.eval_episodes)
 
 if __name__ == '__main__':
     app.run(main)
