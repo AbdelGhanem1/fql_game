@@ -122,7 +122,7 @@ def main(_):
         if i % 1000 == 0:
             pbar.set_description(f"AM Finetuning (Loss: {info['loss']:.4f} | Rew: {info['avg_reward']:.2f})")
             
-        if i % FLAGS.eval_interval == 0:
+        if i % 1000 == 0:
             print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > AM Loss: {info['loss']:.4f} | Proxy Reward: {info['avg_reward']:.2f}")
             print("    Running Eval...")
