@@ -24,21 +24,30 @@ if __name__ == '__main__':
     flags.DEFINE_integer('log_interval', 5000, 'Log interval.')
     flags.DEFINE_integer('eval_interval', 50000, 'Evaluation interval.')
     flags.DEFINE_integer('batch_size', 256, 'Batch size.')
-    flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
+    flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation.')
 
     def get_default_config():
         flow = ml_collections.ConfigDict({
             'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
-            'actor_hidden_dims': (512, 512, 512, 512), 'actor_layer_norm': False,
+            # [FIX] Deeper network for complex tasks
+            'actor_hidden_dims': (256, 256, 256, 256), 
+            'actor_layer_norm': False,
             'flow_steps': 10, 'encoder': ml_collections.config_dict.placeholder(str),
             'action_dim': ml_collections.config_dict.placeholder(int),
         })
         iql = ml_collections.ConfigDict({
             'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
-            'actor_hidden_dims': (256, 256), 'value_hidden_dims': (256, 256),
-            'layer_norm': True, 'actor_layer_norm': False,
-            'discount': 0.99, 'tau': 0.005, 'expectile': 0.7,
-            'actor_loss': 'awr', 'alpha': 10.0, 'const_std': True,
+            # [FIX] Deeper network + Layer Norm enabled
+            'actor_hidden_dims': (256, 256, 256, 256), 
+            'value_hidden_dims': (256, 256, 256, 256),
+            'layer_norm': True, 
+            'actor_layer_norm': False,
+            'discount': 0.99, 
+            'tau': 0.005, 
+            'expectile': 0.7,
+            'actor_loss': 'awr', 
+            'alpha': 10.0, 
+            'const_std': True,
             'encoder': ml_collections.config_dict.placeholder(str),
         })
         return ml_collections.ConfigDict({'flow': flow, 'iql': iql})
@@ -77,29 +86,26 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
             print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > Flow Loss: {flow_info['loss']:.4f} | Q Loss: {critic_info['critic/critic_loss']:.4f}")
             
-            # Pass eval_temperature
-            eval_metrics, _, _ = evaluate(
-                agent=flow_agent,
-                env=eval_env,
-                config=config.flow,
-                num_eval_episodes=eval_episodes,
-                eval_temperature=eval_temperature 
-            )
-            
-            # [CRITICAL FIX] Correct key is 'episode.return', not 'evaluation/return'
-            raw_return = eval_metrics.get('episode.return', eval_metrics.get('evaluation/return', -1000))
-            
-            # Use unwrapped to avoid warnings/errors
-            try:
-                norm_score = env.unwrapped.get_normalized_score(raw_return) * 100.0
-            except AttributeError:
-                norm_score = raw_return
-            
-            print(f"    Eval Result   > Raw: {raw_return:.2f} | Norm: {norm_score:.2f}")
+            # --- 1. Evaluate Flow Agent ---
+            flow_metrics, _, _ = evaluate(flow_agent, eval_env, config.flow, eval_episodes, eval_temperature=eval_temperature)
+            flow_raw = flow_metrics.get('episode.return', flow_metrics.get('evaluation/return', -1000))
+            try: flow_norm = env.unwrapped.get_normalized_score(flow_raw) * 100.0
+            except: flow_norm = flow_raw
+
+            # --- 2. Evaluate IQL Agent (Critic) ---
+            # IQL agent has a sample_actions method (AWR), so we can eval it directly
+            critic_metrics, _, _ = evaluate(critic_agent, eval_env, config.iql, eval_episodes, eval_temperature=eval_temperature)
+            critic_raw = critic_metrics.get('episode.return', critic_metrics.get('evaluation/return', -1000))
+            try: critic_norm = env.unwrapped.get_normalized_score(critic_raw) * 100.0
+            except: critic_norm = critic_raw
+
+            print(f"    Flow Agent    > Raw: {flow_raw:.2f} | Norm: {flow_norm:.2f}")
+            print(f"    IQL Agent     > Raw: {critic_raw:.2f} | Norm: {critic_norm:.2f}")
             print(f"--------------------------------\n")
             
-            if raw_return > best_eval_score:
-                best_eval_score = raw_return
+            # Save if Flow Agent improves (Primary Goal)
+            if flow_raw > best_eval_score:
+                best_eval_score = flow_raw
                 best_agents['flow'] = flow_agent
                 best_agents['critic'] = critic_agent
                 
