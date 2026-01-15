@@ -107,7 +107,7 @@ def main(_):
     best_am_score = -float('inf')
     
     # Baseline Eval
-    metrics, _, _ = evaluate(flow_agent, eval_env, num_eval_episodes=2, eval_temperature=FLAGS.eval_temperature)
+    metrics, _, _ = evaluate(flow_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
     base_raw = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
     try: norm_base = env.unwrapped.get_normalized_score(base_raw) * 100.0
     except: norm_base = base_raw
