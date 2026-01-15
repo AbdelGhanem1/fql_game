@@ -63,11 +63,10 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         Sample actions by solving the ODE (Euler method) using the Student Policy.
         Handles both batched (N, D) and unbatched (D,) inputs.
         """
-        # [FIX] Handle unbatched input
         is_single_input = False
         if observations.ndim == 1:
             is_single_input = True
-            observations = observations[None, :] # Expand to (1, D)
+            observations = observations[None, :]
 
         batch_size = observations.shape[0]
         action_dim = self.config['action_dim']
@@ -75,28 +74,22 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         if seed is None:
             seed = jax.random.PRNGKey(0)
             
-        # 1. Sample Noise x_0 scaled by temperature
         actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
-        # 2. Integration
         steps = self.config.get('am_steps', 10) 
         dt = 1.0 / steps
         
         def body_fn(i, val):
             curr_actions = val
             t = jnp.full((batch_size, 1), i * dt)
-            
-            # Predict velocity
             vel = self.network.select('student_policy')(
                 observations, curr_actions, t, params=self.network.params
             )
             return curr_actions + vel * dt
 
         actions = jax.lax.fori_loop(0, steps, body_fn, actions)
-        
         actions = jnp.clip(actions, -1, 1)
 
-        # [FIX] Squeeze return
         if is_single_input:
             actions = actions[0]
 
@@ -217,17 +210,19 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         return self.replace(network=new_network, rng=rng), info
 
 def get_config():
+    # Placeholder config; values will be populated from FLAGS in main.py
     config = ml_collections.ConfigDict(dict(
         agent_name='adjoint_matching',
         lr=1e-4,
         batch_size=256,
         actor_hidden_dims=(512, 512, 512, 512),
         actor_layer_norm=False,
-        am_steps=40,
-        reward_scale=1.0, 
-        LCT=10.0,
-        q_grad_clip=10.0,
-        vjp_clip=10.0,
+        # Hyperparameters now default to placeholders
+        am_steps=ml_collections.config_dict.placeholder(int),
+        reward_scale=ml_collections.config_dict.placeholder(float),
+        LCT=ml_collections.config_dict.placeholder(float),
+        q_grad_clip=ml_collections.config_dict.placeholder(float),
+        vjp_clip=ml_collections.config_dict.placeholder(float),
         action_dim=ml_collections.config_dict.placeholder(int),
     ))
     return config

@@ -19,21 +19,29 @@ from train_base import train_base_models
 
 FLAGS = flags.FLAGS
 
+# Environment & Paths
 flags.DEFINE_string('env_name', 'halfcheetah-medium-v2', 'Environment name.')
 flags.DEFINE_string('save_dir', './saved_models/', 'Directory to save checkpoints.')
 flags.DEFINE_string('pretrained_flow_path', '', 'Path to pretrained FlowBC agent.')
 flags.DEFINE_string('pretrained_critic_path', '', 'Path to pretrained IQL agent.')
 flags.DEFINE_integer('seed', 42, 'Random seed.')
 
-# Steps
+# Training Steps
 flags.DEFINE_integer('am_steps', 200000, 'Number of AM finetuning steps.')
 flags.DEFINE_integer('base_train_steps', 1000000, 'Steps for base training (if needed).')
 
-# Evaluation Intervals & Settings
+# Evaluation Settings
 flags.DEFINE_integer('eval_interval', 50000, 'Interval for Base Training evaluation.')
 flags.DEFINE_integer('am_eval_interval', 5000, 'Interval for AM Finetuning evaluation.')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of evaluation episodes.')
 flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
+
+# AM Hyperparameters (Exposed)
+flags.DEFINE_float('reward_scale', 1.0, 'Scale of the Q-guidance signal.')
+flags.DEFINE_float('q_grad_clip', 10.0, 'Clip value for the gradient of the Q-function.')
+flags.DEFINE_float('LCT', 10.0, 'Large Deviation Truncation threshold for loss.')
+flags.DEFINE_float('vjp_clip', 10.0, 'Clip value for the vector-Jacobian product in adjoint.')
+flags.DEFINE_integer('ode_steps', 40, 'Number of ODE steps for AM training and inference.')
 
 def get_full_config():
     flow = ml_collections.ConfigDict({
@@ -83,22 +91,28 @@ def main(_):
         print("Agents successfully restored.")
     else:
         print("Pretrained paths not provided. Triggering Base Training...")
-        # Pass flags to train_base
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
             seed=FLAGS.seed,
             config=FLAGS.config,
             save_dir=FLAGS.save_dir,
             max_steps=FLAGS.base_train_steps,
-            eval_interval=FLAGS.eval_interval, # Uses the base interval flag
+            eval_interval=FLAGS.eval_interval,
             eval_episodes=FLAGS.eval_episodes,
             eval_temperature=FLAGS.eval_temperature 
         )
 
     # --- 2. Initialize Adjoint Matching ---
     print(f"Initializing Adjoint Matching Agent...")
-    FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
     
+    # [FIX] Populate Config from Flags
+    FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
+    FLAGS.config.am.reward_scale = FLAGS.reward_scale
+    FLAGS.config.am.LCT = FLAGS.LCT
+    FLAGS.config.am.q_grad_clip = FLAGS.q_grad_clip
+    FLAGS.config.am.vjp_clip = FLAGS.vjp_clip
+    FLAGS.config.am.am_steps = FLAGS.ode_steps
+
     am_agent = AdjointMatchingAgent.create(
         seed=FLAGS.seed,
         ex_observations=example_batch['observations'],
@@ -110,17 +124,12 @@ def main(_):
 
     # --- 3. SANITY CHECK SETUP: Fixed Batch Monitor ---
     print("[Main] Setting up Fixed Batch Monitor...")
-    # Sample a fixed batch of states to track throughout training
     monitor_batch = train_dataset.sample(32)
     monitor_obs = monitor_batch['observations']
     
-    # Compute Baseline Actions (Using deterministic temp=0 for clean comparison)
     base_actions = flow_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
-    
-    # Compute Baseline Q-Values
     q1_base, q2_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
-    base_q_values = jnp.minimum(q1_base, q2_base)
-    mean_base_q = jnp.mean(base_q_values)
+    mean_base_q = jnp.mean(jnp.minimum(q1_base, q2_base))
     
     print(f"[Monitor] Baseline Q-Value on Fixed Batch: {mean_base_q:.4f}")
 
@@ -143,18 +152,11 @@ def main(_):
         
         # --- Monitor Logic (Every 1000 steps) ---
         if i % 1000 == 0:
-            # 1. Get Current Student Actions on the SAME fixed batch
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
-            
-            # 2. Get Current Q-Values
             q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
-            curr_q_values = jnp.minimum(q1_curr, q2_curr)
+            mean_curr_q = jnp.mean(jnp.minimum(q1_curr, q2_curr))
             
-            # 3. Calculate Metrics
-            mean_curr_q = jnp.mean(curr_q_values)
             q_improvement = mean_curr_q - mean_base_q
-            
-            # Calculate Drift (L2 Norm)
             action_drift = jnp.mean(jnp.linalg.norm(current_actions - base_actions, axis=-1))
             
             pbar.set_description(
@@ -171,7 +173,6 @@ def main(_):
             print("    Running Eval...")
             
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
-            
             eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
             
             try: normalized_score = env.unwrapped.get_normalized_score(eval_score) * 100.0
