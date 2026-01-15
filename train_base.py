@@ -10,7 +10,6 @@ import flax
 
 from envs.env_utils import make_env_and_datasets 
 from utils.datasets import Dataset
-# [FIX] Use Repo's evaluation utility
 from utils.evaluation import evaluate
 from agents.flow_bc import FlowBCAgent
 from agents.iql import IQLAgent
@@ -25,6 +24,8 @@ if __name__ == '__main__':
     flags.DEFINE_integer('log_interval', 5000, 'Log interval.')
     flags.DEFINE_integer('eval_interval', 50000, 'Evaluation interval.')
     flags.DEFINE_integer('batch_size', 256, 'Batch size.')
+    # [FIX] Added Eval Temperature Flag
+    flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
 
     def get_default_config():
         flow = ml_collections.ConfigDict({
@@ -45,7 +46,7 @@ if __name__ == '__main__':
 
     config_flags.DEFINE_config_dict('config', get_default_config(), 'Combined configuration.')
 
-def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_interval=50000, eval_episodes=10):
+def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_interval=50000, eval_episodes=10, eval_temperature=1.0):
     os.makedirs(save_dir, exist_ok=True)
     
     print(f"[Base Training] Initializing {env_name}...")
@@ -77,20 +78,14 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
             print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > Flow Loss: {flow_info['loss']:.4f} | Q Loss: {critic_info['critic/critic_loss']:.4f}")
             
-            # [FIX] Use repo's evaluate()
-            # It returns (metrics_dict, trajectories, renders)
+            # [FIX] Pass eval_temperature
             eval_metrics, _, _ = evaluate(
                 agent=flow_agent,
                 env=eval_env,
-                config=config.flow, # Pass config if needed by wrapper
-                num_eval_episodes=eval_episodes
+                config=config.flow,
+                num_eval_episodes=eval_episodes,
+                eval_temperature=eval_temperature 
             )
-            
-            # Extract score from metrics dict (repo usually puts 'evaluation/return' or similar)
-            # But usually we check for normalized score
-            # The repo's evaluate() calculates stats but 'normalized score' might still need manual retrieval 
-            # if not in the dict. However, standard D4RL eval puts normalized score in there?
-            # Let's check keys: usually 'evaluation/return' is raw return.
             
             raw_return = eval_metrics.get('evaluation/return', -1000)
             
@@ -115,7 +110,7 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
     return best_agents['flow'], best_agents['critic']
 
 def main(_):
-    train_base_models(FLAGS.env_name, FLAGS.seed, FLAGS.config, FLAGS.save_dir, FLAGS.max_steps, FLAGS.eval_interval, FLAGS.eval_episodes)
+    train_base_models(FLAGS.env_name, FLAGS.seed, FLAGS.config, FLAGS.save_dir, FLAGS.max_steps, FLAGS.eval_interval, FLAGS.eval_episodes, FLAGS.eval_temperature)
 
 if __name__ == '__main__':
     app.run(main)

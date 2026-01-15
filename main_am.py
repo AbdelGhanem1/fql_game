@@ -10,7 +10,6 @@ import flax
 
 from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
-# [FIX] Use Repo's evaluation utility
 from utils.evaluation import evaluate
 from agents.flow_bc import FlowBCAgent
 from agents.iql import IQLAgent
@@ -28,6 +27,8 @@ flags.DEFINE_integer('am_steps', 200000, 'Number of AM finetuning steps.')
 flags.DEFINE_integer('base_train_steps', 1000000, 'Steps for base training (if needed).')
 flags.DEFINE_integer('eval_interval', 10000, 'Evaluation interval.')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of evaluation episodes.')
+# [FIX] Added Eval Temperature Flag
+flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
 
 def get_full_config():
     flow = ml_collections.ConfigDict({
@@ -77,6 +78,7 @@ def main(_):
         print("Agents successfully restored.")
     else:
         print("Pretrained paths not provided. Triggering Base Training...")
+        # Pass flags to train_base
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
             seed=FLAGS.seed,
@@ -84,7 +86,8 @@ def main(_):
             save_dir=FLAGS.save_dir,
             max_steps=FLAGS.base_train_steps,
             eval_interval=FLAGS.eval_interval,
-            eval_episodes=FLAGS.eval_episodes
+            eval_episodes=FLAGS.eval_episodes,
+            eval_temperature=FLAGS.eval_temperature 
         )
 
     # --- 2. Initialize Adjoint Matching ---
@@ -105,8 +108,8 @@ def main(_):
     best_am_score = -float('inf')
     
     # Baseline Eval
-    # [FIX] Use repo's evaluate()
-    metrics, _, _ = evaluate(flow_agent, eval_env, num_eval_episodes=2)
+    # [FIX] Pass eval_temperature
+    metrics, _, _ = evaluate(flow_agent, eval_env, num_eval_episodes=2, eval_temperature=FLAGS.eval_temperature)
     base_raw = metrics.get('evaluation/return', -1000)
     try: norm_base = env.get_normalized_score(base_raw) * 100.0
     except: norm_base = base_raw
@@ -126,8 +129,8 @@ def main(_):
             print(f"    Train Metrics > AM Loss: {info['loss']:.4f} | Proxy Reward: {info['avg_reward']:.2f}")
             print("    Running Eval...")
             
-            # [FIX] Use repo's evaluate()
-            metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes)
+            # [FIX] Pass eval_temperature
+            metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
             eval_score = metrics.get('evaluation/return', -1000)
             
             try: normalized_score = env.get_normalized_score(eval_score) * 100.0
