@@ -123,7 +123,7 @@ def main(_):
             critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
     else:
         # TRAIN
-        print(f"[Seed {FLAGS.seed}] No existing model found. Starting Base Training (100k steps)...")
+        print(f"[Seed {FLAGS.seed}] No existing model found. Starting Base Training ...")
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
             seed=FLAGS.seed,

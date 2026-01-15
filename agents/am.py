@@ -150,7 +150,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         X_final_clean = X_pre_final + v_base_final * dt
         
         def reward_fn(a):
-            q1, q2 = self.critic_agent.network.select('target_critic')(observations, actions=a)
+            # [CRITICAL FIX] Clip actions before IQL critic to ensure stability
+            a_clipped = jnp.clip(a, -1.0, 1.0)
+            q1, q2 = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
             min_q = jnp.minimum(q1, q2)
             return jnp.sum(min_q) * self.config['reward_scale']
 
@@ -201,8 +203,20 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                 return self.get_ode_drift(params, 'student_policy', observations, x_t, i / n_steps)
             
             preds = jax.vmap(get_drift)(jnp.arange(n_steps), traj[:-1])
+            
+            # [CRITICAL FIX] Apply 4/sigma^2 weighting (Eq. 217 in AM Paper)
+            steps = jnp.arange(n_steps)
+            t_float = steps / n_steps
+            sigma_sq = 2 * (1 - t_float + dt) / (t_float + dt)
+            
+            # Weight is 4 / sigma^2. Added 1e-5 to prevent division by zero (though t < 1 here)
+            weights = 4.0 / (sigma_sq + 1e-5)
+            weights = weights[:, None] # Broadcast to (n_steps, batch_size)
+            
             sq_err = jnp.sum((preds - targets)**2, axis=-1)
-            loss = jnp.mean(jnp.clip(sq_err, a_max=self.config['LCT']))
+            weighted_sq_err = weights * sq_err
+            
+            loss = jnp.mean(jnp.clip(weighted_sq_err, a_max=self.config['LCT']))
             return loss, {'loss': loss}
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
