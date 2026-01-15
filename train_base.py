@@ -24,7 +24,6 @@ if __name__ == '__main__':
     flags.DEFINE_integer('log_interval', 5000, 'Log interval.')
     flags.DEFINE_integer('eval_interval', 50000, 'Evaluation interval.')
     flags.DEFINE_integer('batch_size', 256, 'Batch size.')
-    # [FIX] Added Eval Temperature Flag
     flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
 
     def get_default_config():
@@ -78,7 +77,7 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
             print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > Flow Loss: {flow_info['loss']:.4f} | Q Loss: {critic_info['critic/critic_loss']:.4f}")
             
-            # [FIX] Pass eval_temperature
+            # Pass eval_temperature
             eval_metrics, _, _ = evaluate(
                 agent=flow_agent,
                 env=eval_env,
@@ -87,10 +86,12 @@ def train_base_models(env_name, seed, config, save_dir, max_steps=1000000, eval_
                 eval_temperature=eval_temperature 
             )
             
-            raw_return = eval_metrics.get('evaluation/return', -1000)
+            # [CRITICAL FIX] Correct key is 'episode.return', not 'evaluation/return'
+            raw_return = eval_metrics.get('episode.return', eval_metrics.get('evaluation/return', -1000))
             
+            # Use unwrapped to avoid warnings/errors
             try:
-                norm_score = env.get_normalized_score(raw_return) * 100.0
+                norm_score = env.unwrapped.get_normalized_score(raw_return) * 100.0
             except AttributeError:
                 norm_score = raw_return
             

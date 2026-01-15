@@ -27,7 +27,6 @@ flags.DEFINE_integer('am_steps', 200000, 'Number of AM finetuning steps.')
 flags.DEFINE_integer('base_train_steps', 1000000, 'Steps for base training (if needed).')
 flags.DEFINE_integer('eval_interval', 10000, 'Evaluation interval.')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of evaluation episodes.')
-# [FIX] Added Eval Temperature Flag
 flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
 
 def get_full_config():
@@ -108,10 +107,9 @@ def main(_):
     best_am_score = -float('inf')
     
     # Baseline Eval
-    # [FIX] Pass eval_temperature
     metrics, _, _ = evaluate(flow_agent, eval_env, num_eval_episodes=2, eval_temperature=FLAGS.eval_temperature)
-    base_raw = metrics.get('evaluation/return', -1000)
-    try: norm_base = env.get_normalized_score(base_raw) * 100.0
+    base_raw = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
+    try: norm_base = env.unwrapped.get_normalized_score(base_raw) * 100.0
     except: norm_base = base_raw
     print(f"Baseline (BC) Normalized Score: {norm_base:.2f}")
 
@@ -129,11 +127,12 @@ def main(_):
             print(f"    Train Metrics > AM Loss: {info['loss']:.4f} | Proxy Reward: {info['avg_reward']:.2f}")
             print("    Running Eval...")
             
-            # [FIX] Pass eval_temperature
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
-            eval_score = metrics.get('evaluation/return', -1000)
             
-            try: normalized_score = env.get_normalized_score(eval_score) * 100.0
+            # [CRITICAL FIX] Correct key
+            eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
+            
+            try: normalized_score = env.unwrapped.get_normalized_score(eval_score) * 100.0
             except: normalized_score = eval_score
             
             print(f"    Eval Result   > Raw: {eval_score:.2f} | Norm: {normalized_score:.2f}")

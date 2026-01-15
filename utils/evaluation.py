@@ -76,7 +76,7 @@ def evaluate(
             action = np.clip(action, -1, 1)
 
             next_observation, reward, terminated, truncated, info = env.step(action)
-            print("reward: ", reward)
+            #print("reward: ", reward)
             done = terminated or truncated
             step += 1
 
