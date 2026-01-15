@@ -84,13 +84,46 @@ def main(_):
     train_dataset = Dataset.create(**train_dataset_dict)
     example_batch = train_dataset.sample(1)
     
+
+
     # --- 2. Base Training (or Load) ---
     flow_agent = None
     critic_agent = None
     
-    # Check if we need to train from scratch (for the full experiment)
-    if FLAGS.pretrained_flow_path == '':
-        print(f"[Seed {FLAGS.seed}] Starting Base Training (100k steps)...")
+    # Define the specific filename for THIS seed
+    seed_base_flow_path = os.path.join(FLAGS.save_dir, f'base_flow_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
+    seed_base_critic_path = os.path.join(FLAGS.save_dir, f'base_critic_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
+
+    # LOGIC: If explicit paths are provided, use them. 
+    # Otherwise, check if we already trained this seed before.
+    if FLAGS.pretrained_flow_path != '':
+        # Case A: Paths provided by launcher (e.g., for Scale 1.0 run)
+        load_flow = FLAGS.pretrained_flow_path
+        load_critic = FLAGS.pretrained_critic_path
+        print(f"[Seed {FLAGS.seed}] Loading provided Base Agents:\n  - {load_flow}")
+    elif os.path.exists(seed_base_flow_path):
+        # Case B: No paths provided, BUT we found a saved file for this seed (Auto-Reuse)
+        load_flow = seed_base_flow_path
+        load_critic = seed_base_critic_path
+        print(f"[Seed {FLAGS.seed}] Found existing Base Agents for this seed! Skipping Base Training.\n  - {load_flow}")
+    else:
+        # Case C: No paths, no file. Train from Scratch.
+        load_flow = None
+        load_critic = None
+
+    if load_flow:
+        # LOAD
+        with open(load_flow, 'rb') as f:
+            flow_state = pickle.load(f)
+            flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
+            flow_agent = flax.serialization.from_state_dict(flow_agent, flow_state)
+        with open(load_critic, 'rb') as f:
+            critic_state = pickle.load(f)
+            critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
+            critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
+    else:
+        # TRAIN
+        print(f"[Seed {FLAGS.seed}] No existing model found. Starting Base Training (100k steps)...")
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
             seed=FLAGS.seed,
@@ -101,17 +134,13 @@ def main(_):
             eval_episodes=FLAGS.eval_episodes,
             eval_temperature=FLAGS.eval_temperature 
         )
-        print("Base Training Complete. Transitioning to Finetuning...")
-    else:
-        # Fallback if you want to skip base training (not used in this experiment)
-        with open(FLAGS.pretrained_flow_path, 'rb') as f:
-            flow_state = pickle.load(f)
-            flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
-            flow_agent = flax.serialization.from_state_dict(flow_agent, flow_state)
-        with open(FLAGS.pretrained_critic_path, 'rb') as f:
-            critic_state = pickle.load(f)
-            critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
-            critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
+        
+        # [CRITICAL] Save the specific seed copy immediately after training
+        print(f"[Seed {FLAGS.seed}] Saving persistent base copy...")
+        with open(seed_base_flow_path, 'wb') as f:
+            pickle.dump(flax.serialization.to_state_dict(flow_agent), f)
+        with open(seed_base_critic_path, 'wb') as f:
+            pickle.dump(flax.serialization.to_state_dict(critic_agent), f)
 
     # --- 3. Initialize Adjoint Matching ---
     FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
