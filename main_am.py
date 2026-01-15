@@ -2,6 +2,7 @@ import os
 import pickle
 import numpy as np
 import jax
+import jax.numpy as jnp
 import ml_collections
 from absl import app, flags
 from ml_collections import config_flags
@@ -23,9 +24,14 @@ flags.DEFINE_string('save_dir', './saved_models/', 'Directory to save checkpoint
 flags.DEFINE_string('pretrained_flow_path', '', 'Path to pretrained FlowBC agent.')
 flags.DEFINE_string('pretrained_critic_path', '', 'Path to pretrained IQL agent.')
 flags.DEFINE_integer('seed', 42, 'Random seed.')
+
+# Steps
 flags.DEFINE_integer('am_steps', 200000, 'Number of AM finetuning steps.')
 flags.DEFINE_integer('base_train_steps', 1000000, 'Steps for base training (if needed).')
-flags.DEFINE_integer('eval_interval', 10000, 'Evaluation interval.')
+
+# Evaluation Intervals & Settings
+flags.DEFINE_integer('eval_interval', 50000, 'Interval for Base Training evaluation.')
+flags.DEFINE_integer('am_eval_interval', 5000, 'Interval for AM Finetuning evaluation.')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of evaluation episodes.')
 flags.DEFINE_float('eval_temperature', 1.0, 'Temperature for evaluation (0=deterministic, 1=stochastic).')
 
@@ -84,7 +90,7 @@ def main(_):
             config=FLAGS.config,
             save_dir=FLAGS.save_dir,
             max_steps=FLAGS.base_train_steps,
-            eval_interval=FLAGS.eval_interval,
+            eval_interval=FLAGS.eval_interval, # Uses the base interval flag
             eval_episodes=FLAGS.eval_episodes,
             eval_temperature=FLAGS.eval_temperature 
         )
@@ -102,7 +108,23 @@ def main(_):
         critic_agent=critic_agent
     )
 
-    # --- 3. Finetuning Loop ---
+    # --- 3. SANITY CHECK SETUP: Fixed Batch Monitor ---
+    print("[Main] Setting up Fixed Batch Monitor...")
+    # Sample a fixed batch of states to track throughout training
+    monitor_batch = train_dataset.sample(32)
+    monitor_obs = monitor_batch['observations']
+    
+    # Compute Baseline Actions (Using deterministic temp=0 for clean comparison)
+    base_actions = flow_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
+    
+    # Compute Baseline Q-Values
+    q1_base, q2_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
+    base_q_values = jnp.minimum(q1_base, q2_base)
+    mean_base_q = jnp.mean(base_q_values)
+    
+    print(f"[Monitor] Baseline Q-Value on Fixed Batch: {mean_base_q:.4f}")
+
+    # --- 4. Finetuning Loop ---
     print("Starting Adjoint Matching Finetuning...")
     best_am_score = -float('inf')
     
@@ -119,17 +141,37 @@ def main(_):
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
+        # --- Monitor Logic (Every 1000 steps) ---
         if i % 1000 == 0:
-            pbar.set_description(f"AM Finetuning (Loss: {info['loss']:.4f} | Rew: {info['avg_reward']:.2f})")
+            # 1. Get Current Student Actions on the SAME fixed batch
+            current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
             
-        if i % 5000 == 0:
+            # 2. Get Current Q-Values
+            q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
+            curr_q_values = jnp.minimum(q1_curr, q2_curr)
+            
+            # 3. Calculate Metrics
+            mean_curr_q = jnp.mean(curr_q_values)
+            q_improvement = mean_curr_q - mean_base_q
+            
+            # Calculate Drift (L2 Norm)
+            action_drift = jnp.mean(jnp.linalg.norm(current_actions - base_actions, axis=-1))
+            
+            pbar.set_description(
+                f"AM (Loss:{info['loss']:.4f}|"
+                f"dQ:{q_improvement:+.2f}|"
+                f"Drift:{action_drift:.2f})"
+            )
+            
+        # --- Evaluation Logic (Using Configurable Interval) ---
+        if i % FLAGS.am_eval_interval == 0:
             print(f"\n--- Eval Triggered at Step {i} ---")
             print(f"    Train Metrics > AM Loss: {info['loss']:.4f} | Proxy Reward: {info['avg_reward']:.2f}")
+            print(f"    Monitor       > Delta Q: {q_improvement:+.4f} | Action Drift: {action_drift:.4f}")
             print("    Running Eval...")
             
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
             
-            # [CRITICAL FIX] Correct key
             eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
             
             try: normalized_score = env.unwrapped.get_normalized_score(eval_score) * 100.0
