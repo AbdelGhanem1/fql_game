@@ -13,29 +13,18 @@ from utils.networks import ActorVectorField
 class AdjointMatchingAgent(flax.struct.PyTreeNode):
     """
     Adjoint Matching Agent for Finetuning.
-    Uses a pre-trained Critic (from IQL/FQL) as the Reward Model.
     """
     rng: Any
-    network: Any             # The Student Policy (Trainable)
-    base_network: Any        # The Base Policy (Frozen, Source of Truth for BC)
-    critic_agent: Any        # The Critic Agent (Frozen, Reward Model)
+    network: Any             
+    base_network: Any        
+    critic_agent: Any        
     config: Any = nonpytree_field()
 
     @classmethod
-    def create(cls, 
-               seed: int, 
-               ex_observations: jnp.ndarray, 
-               ex_actions: jnp.ndarray, 
-               config: ml_collections.ConfigDict, 
-               base_agent: Any, 
-               critic_agent: Any):
-        """
-        Initializes the AM Agent by copying weights from the Base Agent.
-        """
+    def create(cls, seed, ex_observations, ex_actions, config, base_agent, critic_agent):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
 
-        # 1. Define Network Architecture
         network_def = ModuleDict({
             'student_policy': ActorVectorField(
                 action_dim=config['action_dim'], 
@@ -44,7 +33,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             )
         })
 
-        # 2. Extract Params from Base Agent
         params = base_agent.network.params
         if 'modules_actor_bc_flow' in params:
             base_params = params['modules_actor_bc_flow']
@@ -53,14 +41,12 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         else:
             base_params = params.get('actor_bc_flow', params)
 
-        # 3. Initialize Student with Dummy Data
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
         
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
         
-        # 4. Overwrite Student Weights with Base Weights
         init_params['modules_student_policy'] = base_params
         
         network = TrainState.create(network_def, init_params, tx=network_tx)
@@ -71,13 +57,11 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                    critic_agent=critic_agent, 
                    config=flax.core.FrozenDict(**config))
 
-    # --- Inference ---
-
     @jax.jit
-    def sample_actions(self, observations, seed=None):
+    def sample_actions(self, observations, seed=None, temperature=1.0):
         """
         Sample actions by solving the ODE (Euler method) using the Student Policy.
-        Required for eval_policy.
+        Accepts 'temperature' for compatibility with evaluation.py.
         """
         batch_size = observations.shape[0]
         action_dim = self.config['action_dim']
@@ -85,11 +69,10 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         if seed is None:
             seed = jax.random.PRNGKey(0)
             
-        # 1. Sample Noise x_0
-        actions = jax.random.normal(seed, (batch_size, action_dim))
+        # 1. Sample Noise x_0 scaled by temperature
+        actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
         # 2. Integration
-        # Use 'am_steps' from config for inference precision
         steps = self.config.get('am_steps', 10) 
         dt = 1.0 / steps
         
@@ -97,7 +80,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             curr_actions = val
             t = jnp.full((batch_size, 1), i * dt)
             
-            # Predict velocity using the trained student_policy
+            # Predict velocity
             vel = self.network.select('student_policy')(
                 observations, curr_actions, t, params=self.network.params
             )
@@ -107,8 +90,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         return jnp.clip(actions, -1, 1)
 
-    # --- Helpers ---
-
     def get_ode_drift(self, params, module_name, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
@@ -117,7 +98,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
     def get_base_drift(self, observations, actions, t_scalar):
         batch_size = actions.shape[0]
         times = jnp.full((batch_size, 1), t_scalar)
-        # Handle different base agent types
         if hasattr(self.base_network, 'select'):
              return self.base_network.select('actor_bc_flow')(observations, actions, times)
         else:
@@ -126,8 +106,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                 observations=observations, actions=actions, times=times,
                 method=lambda m: m['actor_bc_flow'](observations, actions, times)
             )
-
-    # --- Core Logic: JAX Scans ---
 
     @functools.partial(jax.jit, static_argnames=('n_steps',))
     def forward_sde(self, rng, observations, n_steps, dt):
@@ -163,11 +141,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         X_pre_final = traj[-2]
         t_pre_final = (n_steps - 1) / n_steps
         
-        # Lookahead Step
         v_base_final = self.get_base_drift(observations, X_pre_final, t_pre_final)
         X_final_clean = X_pre_final + v_base_final * dt
         
-        # Reward Gradient
         def reward_fn(a):
             q1, q2 = self.critic_agent.network.select('target_critic')(observations, actions=a)
             min_q = jnp.minimum(q1, q2)
@@ -178,7 +154,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         avg_reward = reward_fn(X_final_clean) / (self.config['reward_scale'] * observations.shape[0])
 
-        # Backward Scan
         def scan_backward(adjoint, args):
             i, a_curr = args
             t_float = i / n_steps
@@ -213,13 +188,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         n_steps = self.config['am_steps']
         dt = 1.0 / n_steps
 
-        # 1. Forward SDE
         traj = self.forward_sde(step_rng, observations, n_steps, dt)
-        
-        # 2. Backward Targets
         targets, avg_rew = self.compute_targets(traj, observations, n_steps, dt)
         
-        # 3. Update Student
         def loss_fn(params):
             def get_drift(i, x_t):
                 return self.get_ode_drift(params, 'student_policy', observations, x_t, i / n_steps)

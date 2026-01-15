@@ -22,10 +22,6 @@ class FlowBCAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def compute_loss(self, batch, grad_params, rng):
-        """
-        Computes the Flow Matching MSE Loss.
-        Objective: || v_theta(t, x_t) - (x_1 - x_0) ||^2
-        """
         batch_size, action_dim = batch['actions'].shape
         
         rng, x_rng, t_rng = jax.random.split(rng, 3)
@@ -37,13 +33,11 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         # 2. Sample Time t ~ U[0, 1]
         t = jax.random.uniform(t_rng, (batch_size, 1))
         
-        # 3. Linear Interpolation (Rectified Flow / CFM)
-        # This creates straight probability paths
+        # 3. Linear Interpolation
         x_t = (1 - t) * x_0 + t * x_1
         target_vel = x_1 - x_0 
 
         # 4. Predict Velocity
-        # Note: We assume the network handles the 'is_encoded' flag or we explicitly pass encoded obs
         pred_vel = self.network.select('actor_bc_flow')(
             batch['observations'], x_t, t, params=grad_params
         )
@@ -58,7 +52,6 @@ class FlowBCAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def update(self, batch):
-        """Performs one gradient update."""
         new_rng, rng = jax.random.split(self.rng)
 
         def loss_fn(grad_params):
@@ -68,25 +61,26 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         return self.replace(network=new_network, rng=new_rng), info
 
     @jax.jit
-    def sample_actions(self, observations, seed=None):
+    def sample_actions(self, observations, seed=None, temperature=1.0):
         """
         Inference: Solves the ODE dx/dt = v(t, x) using Euler method.
+        Accepts 'temperature' to scale initial noise (0.0 = Deterministic).
         """
         batch_size = observations.shape[0]
         action_dim = self.config['action_dim']
         
         if seed is None:
-            seed = jax.random.PRNGKey(0) # Default if not provided
+            seed = jax.random.PRNGKey(0)
             
-        # 1. Sample Noise x_0
-        actions = jax.random.normal(seed, (batch_size, action_dim))
+        # 1. Sample Noise x_0 scaled by temperature
+        # temp=0 -> x_0=0 (Mean of Gaussian) -> Deterministic Path
+        actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
         # 2. Encode Observations (if encoder exists)
         if self.config['encoder'] is not None:
             observations = self.network.select('actor_bc_flow_encoder')(observations)
 
         # 3. Euler Integration
-        # We use a python loop for small steps (faster unroll) or lax.scan for many steps
         dt = 1.0 / self.config['flow_steps']
         
         def body_fn(i, val):
@@ -99,7 +93,6 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             )
             return curr_actions + vel * dt
 
-        # lax.fori_loop is cleaner for JIT compilation than python range
         actions = jax.lax.fori_loop(0, self.config['flow_steps'], body_fn, actions)
         
         # 4. Clip to valid action space [-1, 1]
@@ -149,15 +142,3 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         config['action_dim'] = action_dim
         
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
-
-def get_config():
-    config = ml_collections.ConfigDict(dict(
-        agent_name='flow_bc',
-        lr=3e-4,
-        batch_size=256,
-        actor_hidden_dims=(512, 512, 512, 512),
-        actor_layer_norm=False,
-        flow_steps=10,
-        encoder=ml_collections.config_dict.placeholder(str),
-    ))
-    return config
