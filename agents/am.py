@@ -61,8 +61,14 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
     def sample_actions(self, observations, seed=None, temperature=1.0):
         """
         Sample actions by solving the ODE (Euler method) using the Student Policy.
-        Accepts 'temperature' for compatibility with evaluation.py.
+        Handles both batched (N, D) and unbatched (D,) inputs.
         """
+        # [FIX] Handle unbatched input
+        is_single_input = False
+        if observations.ndim == 1:
+            is_single_input = True
+            observations = observations[None, :] # Expand to (1, D)
+
         batch_size = observations.shape[0]
         action_dim = self.config['action_dim']
         
@@ -88,7 +94,13 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
 
         actions = jax.lax.fori_loop(0, steps, body_fn, actions)
         
-        return jnp.clip(actions, -1, 1)
+        actions = jnp.clip(actions, -1, 1)
+
+        # [FIX] Squeeze return
+        if is_single_input:
+            actions = actions[0]
+
+        return actions
 
     def get_ode_drift(self, params, module_name, observations, actions, t_scalar):
         batch_size = actions.shape[0]

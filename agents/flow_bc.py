@@ -64,8 +64,14 @@ class FlowBCAgent(flax.struct.PyTreeNode):
     def sample_actions(self, observations, seed=None, temperature=1.0):
         """
         Inference: Solves the ODE dx/dt = v(t, x) using Euler method.
-        Accepts 'temperature' to scale initial noise (0.0 = Deterministic).
+        Handles both batched (N, D) and unbatched (D,) inputs.
         """
+        # [FIX] Handle unbatched observations (coming from evaluate.py)
+        is_single_input = False
+        if observations.ndim == 1:
+            is_single_input = True
+            observations = observations[None, :] # Expand to (1, ObsDim)
+
         batch_size = observations.shape[0]
         action_dim = self.config['action_dim']
         
@@ -73,11 +79,11 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             seed = jax.random.PRNGKey(0)
             
         # 1. Sample Noise x_0 scaled by temperature
-        # temp=0 -> x_0=0 (Mean of Gaussian) -> Deterministic Path
         actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
         # 2. Encode Observations (if encoder exists)
         if self.config['encoder'] is not None:
+            # Encoder usually expects batched input too
             observations = self.network.select('actor_bc_flow_encoder')(observations)
 
         # 3. Euler Integration
@@ -97,6 +103,11 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         
         # 4. Clip to valid action space [-1, 1]
         actions = jnp.clip(actions, -1, 1)
+
+        # [FIX] Squeeze back if input was single
+        if is_single_input:
+            actions = actions[0]
+
         return actions
 
     @classmethod
