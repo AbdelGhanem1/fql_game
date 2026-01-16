@@ -235,7 +235,7 @@ def main(_):
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
-        if i % 500 == 0:
+        if i % FLAGS.am_eval_interval == 0:
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
             q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
             mean_curr_q = jnp.mean(jnp.minimum(q1_curr, q2_curr))
