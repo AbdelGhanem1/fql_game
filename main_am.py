@@ -215,7 +215,7 @@ def main(_):
     # --- 4. Setup Fixed Batch Monitor ---
     monitor_batch = train_dataset.sample(32)
     monitor_obs = monitor_batch['observations']
-    base_actions = flow_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
+    base_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
     q1_base, q2_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
     mean_base_q = jnp.mean(jnp.minimum(q1_base, q2_base))
     
