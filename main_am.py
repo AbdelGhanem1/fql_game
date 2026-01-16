@@ -11,6 +11,9 @@ import tqdm
 import flax 
 import wandb
 
+import matplotlib.pyplot as plt
+import numpy as np
+
 from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
 from utils.evaluation import evaluate
@@ -69,6 +72,59 @@ def set_global_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
     # JAX seeding is handled by passing the key, but we set python/numpy for dataloaders
+
+
+
+
+
+def log_reward_comparison(base_trajs, finetuned_trajs, wandb_key="comparison/reward_profile"):
+    """
+    Plots the mean reward per timestep (with std dev shading) for Base vs Finetuned.
+    """
+    def get_curve_stats(trajs):
+        # 1. Extract all reward lists
+        all_rewards = [t['reward'] for t in trajs]
+        
+        # 2. Handle variable episode lengths by padding with NaN
+        max_len = max(len(r) for r in all_rewards)
+        padded_rewards = np.full((len(all_rewards), max_len), np.nan)
+        
+        for i, r in enumerate(all_rewards):
+            padded_rewards[i, :len(r)] = r
+            
+        # 3. Compute Mean and Std (ignoring NaNs for shorter episodes)
+        mean = np.nanmean(padded_rewards, axis=0)
+        std = np.nanstd(padded_rewards, axis=0)
+        steps = np.arange(max_len)
+        
+        return steps, mean, std
+
+    # Get stats
+    b_steps, b_mean, b_std = get_curve_stats(base_trajs)
+    f_steps, f_mean, f_std = get_curve_stats(finetuned_trajs)
+
+    # Create Plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot Base
+    ax.plot(b_steps, b_mean, label=f'Base Model (Area={np.nansum(b_mean):.1f})', color='blue', alpha=0.8)
+    ax.fill_between(b_steps, b_mean - b_std, b_mean + b_std, color='blue', alpha=0.15)
+    
+    # Plot Finetuned
+    ax.plot(f_steps, f_mean, label=f'Finetuned AM (Area={np.nansum(f_mean):.1f})', color='red', alpha=0.8)
+    ax.fill_between(f_steps, f_mean - f_std, f_mean + f_std, color='red', alpha=0.15)
+    
+    ax.set_title("Reward Profile: Base vs Finetuned")
+    ax.set_xlabel("Episode Step")
+    ax.set_ylabel("Step Reward")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Log to WandB
+    wandb.log({wandb_key: wandb.Image(fig)})
+    
+    # Close plot to free memory
+    plt.close(fig)
 
 def main(_):
     # Ensure full reproducibility
@@ -169,6 +225,19 @@ def main(_):
     
     wandb.log({"monitor/baseline_q": mean_base_q})
 
+
+
+
+    print(f"[Seed {FLAGS.seed}] Profiling Base Agent...")
+    base_stats, base_trajs, _ = evaluate(
+        agent=flow_agent, # Or whichever agent is your base
+        env=eval_env, 
+        num_eval_episodes=FLAGS.eval_episodes, # Use the flag!
+        eval_temperature=FLAGS.eval_temperature
+    )
+    # Optional: Log the scalar base score immediately
+    wandb.log({"base/final_norm_score": base_stats['episode.normalized_return']})
+
     # --- 5. Finetuning Loop ---
     print(f"[Seed {FLAGS.seed}] Starting AM Finetuning (Scale: {FLAGS.reward_scale}, 10k steps)...")
     
@@ -210,6 +279,22 @@ def main(_):
             })
             
             pbar.set_description(f"AM (Drift:{action_drift:.2f}|Score:{normalized_score:.1f})")
+
+
+
+            
+    print(f"[Seed {FLAGS.seed}] Profiling Final Agent...")
+    final_stats, final_trajs, _ = evaluate(
+        agent=am_agent, 
+        env=eval_env, 
+        num_eval_episodes=FLAGS.eval_episodes, 
+        eval_temperature=FLAGS.eval_temperature
+    )
+
+    # Generate and Upload the Comparison Plot
+    log_reward_comparison(base_trajs, final_trajs)
+
+    print("Comparison plot uploaded to WandB.")
 
 if __name__ == '__main__':
     app.run(main)
