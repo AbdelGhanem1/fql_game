@@ -1,4 +1,17 @@
 import os
+
+# --- [FIX START] ---
+# Fix for "ValueError: Key backend..."
+# We must set the backend to 'Agg' before importing pyplot.
+# This tells matplotlib "we are saving images to files, not showing a window".
+import matplotlib
+try:
+    matplotlib.use('Agg')
+except:
+    pass
+# --- [FIX END] ---
+
+import matplotlib.pyplot as plt
 import pickle
 import random
 import numpy as np
@@ -10,9 +23,6 @@ from ml_collections import config_flags
 import tqdm
 import flax 
 import wandb
-
-import matplotlib.pyplot as plt
-import numpy as np
 
 from envs.env_utils import make_env_and_datasets
 from utils.datasets import Dataset
@@ -73,10 +83,6 @@ def set_global_seed(seed):
     random.seed(seed)
     # JAX seeding is handled by passing the key, but we set python/numpy for dataloaders
 
-
-
-
-
 def log_reward_comparison(base_trajs, finetuned_trajs, wandb_key="comparison/reward_profile"):
     """
     Plots the mean reward per timestep (with std dev shading) for Base vs Finetuned.
@@ -135,40 +141,30 @@ def main(_):
     wandb.init(config=FLAGS.config.to_dict())
     
     # --- 1. Init Environment ---
-    # make_env_and_datasets uses np.random, so global seed helps here
     env, eval_env, train_dataset_dict, _ = make_env_and_datasets(FLAGS.env_name, frame_stack=None)
     train_dataset = Dataset.create(**train_dataset_dict)
     example_batch = train_dataset.sample(1)
     
-
-
     # --- 2. Base Training (or Load) ---
     flow_agent = None
     critic_agent = None
     
-    # Define the specific filename for THIS seed
     seed_base_flow_path = os.path.join(FLAGS.save_dir, f'base_flow_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
     seed_base_critic_path = os.path.join(FLAGS.save_dir, f'base_critic_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
 
-    # LOGIC: If explicit paths are provided, use them. 
-    # Otherwise, check if we already trained this seed before.
     if FLAGS.pretrained_flow_path != '':
-        # Case A: Paths provided by launcher (e.g., for Scale 1.0 run)
         load_flow = FLAGS.pretrained_flow_path
         load_critic = FLAGS.pretrained_critic_path
         print(f"[Seed {FLAGS.seed}] Loading provided Base Agents:\n  - {load_flow}")
     elif os.path.exists(seed_base_flow_path):
-        # Case B: No paths provided, BUT we found a saved file for this seed (Auto-Reuse)
         load_flow = seed_base_flow_path
         load_critic = seed_base_critic_path
         print(f"[Seed {FLAGS.seed}] Found existing Base Agents for this seed! Skipping Base Training.\n  - {load_flow}")
     else:
-        # Case C: No paths, no file. Train from Scratch.
         load_flow = None
         load_critic = None
 
     if load_flow:
-        # LOAD
         with open(load_flow, 'rb') as f:
             flow_state = pickle.load(f)
             flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
@@ -178,7 +174,6 @@ def main(_):
             critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
             critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
     else:
-        # TRAIN
         print(f"[Seed {FLAGS.seed}] No existing model found. Starting Base Training ...")
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
@@ -190,8 +185,6 @@ def main(_):
             eval_episodes=FLAGS.eval_episodes,
             eval_temperature=FLAGS.eval_temperature 
         )
-        
-        # [CRITICAL] Save the specific seed copy immediately after training
         print(f"[Seed {FLAGS.seed}] Saving persistent base copy...")
         with open(seed_base_flow_path, 'wb') as f:
             pickle.dump(flax.serialization.to_state_dict(flow_agent), f)
@@ -218,37 +211,30 @@ def main(_):
     # --- 4. Setup Fixed Batch Monitor ---
     monitor_batch = train_dataset.sample(32)
     monitor_obs = monitor_batch['observations']
-    # Use deterministic sampling for baseline
     base_actions = flow_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
     q1_base, q2_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
     mean_base_q = jnp.mean(jnp.minimum(q1_base, q2_base))
     
     wandb.log({"monitor/baseline_q": mean_base_q})
 
-
-
-
+    # --- [NEW] Evaluate Base Agent ---
     print(f"[Seed {FLAGS.seed}] Profiling Base Agent...")
     base_stats, base_trajs, _ = evaluate(
-        agent=flow_agent, # Or whichever agent is your base
+        agent=flow_agent, 
         env=eval_env, 
-        num_eval_episodes=FLAGS.eval_episodes, # Use the flag!
+        num_eval_episodes=FLAGS.eval_episodes, 
         eval_temperature=FLAGS.eval_temperature
     )
-    # Optional: Log the scalar base score immediately
-    wandb.log({"base/final_norm_score": base_stats['episode.normalized_return']})
+    wandb.log({"base/final_norm_score": base_stats.get('episode.normalized_return', 0)})
 
     # --- 5. Finetuning Loop ---
     print(f"[Seed {FLAGS.seed}] Starting AM Finetuning (Scale: {FLAGS.reward_scale}, 10k steps)...")
-    
-    # Progress bar
     pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc=f"AM-Scale-{FLAGS.reward_scale}-Seed-{FLAGS.seed}", mininterval=5.0, ncols=100)
 
     for i in pbar:
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
-        # Monitor every 500 steps (matches eval interval)
         if i % 500 == 0:
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
             q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
@@ -264,7 +250,6 @@ def main(_):
                 "am_step": i
             })
             
-        # Evaluation Logic (Every 500 steps)
         if i % FLAGS.am_eval_interval == 0:
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
             eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
@@ -277,12 +262,9 @@ def main(_):
                 "am/norm_score": normalized_score,
                 "am_step": i
             })
-            
             pbar.set_description(f"AM (Drift:{action_drift:.2f}|Score:{normalized_score:.1f})")
 
-
-
-            
+    # --- [NEW] Evaluate Final Agent ---
     print(f"[Seed {FLAGS.seed}] Profiling Final Agent...")
     final_stats, final_trajs, _ = evaluate(
         agent=am_agent, 
