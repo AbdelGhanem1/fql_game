@@ -83,7 +83,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             curr_actions = val
             t = jnp.full((batch_size, 1), i * dt)
             vel = self.network.select('student_policy')(
-                observations, curr_actions, t, params=self.network.params
+                observations, curr_actions, t, is_encoded=False
             )
             return curr_actions + vel * dt
 
