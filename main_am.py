@@ -240,10 +240,9 @@ def main(_):
     action_drift = 0.0
     normalized_score = 0.0
     
-    # [FIX] Dynamic Moving Average Window
-    # We want the average to represent the last ~2,500 gradient steps of "experience".
-    SMOOTHING_HORIZON_STEPS = 2500
-    window_size = max(1, int(SMOOTHING_HORIZON_STEPS / FLAGS.am_eval_interval))
+
+    
+    window_size = 3
     score_history = deque(maxlen=window_size)
     
     print(f"[Seed {FLAGS.seed}] Moving Average Window: {window_size} points (Horizon: {SMOOTHING_HORIZON_STEPS} steps)")

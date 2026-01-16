@@ -62,7 +62,7 @@ def evaluate(
     stats = defaultdict(list)
 
     renders = []
-    for i in trange(num_eval_episodes + num_video_episodes):
+    for i in range(num_eval_episodes + num_video_episodes):
         traj = defaultdict(list)
         should_render = i >= num_eval_episodes
 
