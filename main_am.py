@@ -15,6 +15,10 @@ import matplotlib.pyplot as plt
 import pickle
 import random
 import numpy as np
+
+from collections import deque
+
+
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -229,19 +233,33 @@ def main(_):
 
     # --- 5. Finetuning Loop ---
     print(f"[Seed {FLAGS.seed}] Starting AM Finetuning (Scale: {FLAGS.reward_scale}, 10k steps)...")
+    
     pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc=f"AM-Scale-{FLAGS.reward_scale}-Seed-{FLAGS.seed}", mininterval=5.0, ncols=100)
+
+    # Initialize variables
+    action_drift = 0.0
+    normalized_score = 0.0
+    
+    # [FIX] Dynamic Moving Average Window
+    # We want the average to represent the last ~2,500 gradient steps of "experience".
+    SMOOTHING_HORIZON_STEPS = 2500
+    window_size = max(1, int(SMOOTHING_HORIZON_STEPS / FLAGS.am_eval_interval))
+    score_history = deque(maxlen=window_size)
+    
+    print(f"[Seed {FLAGS.seed}] Moving Average Window: {window_size} points (Horizon: {SMOOTHING_HORIZON_STEPS} steps)")
 
     for i in pbar:
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
         if i % FLAGS.am_eval_interval == 0:
+            # --- A. Monitor Metrics ---
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
             q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
             mean_curr_q = jnp.mean(jnp.minimum(q1_curr, q2_curr))
             
             q_improvement = mean_curr_q - mean_base_q
-            action_drift = jnp.mean(jnp.linalg.norm(current_actions - base_actions, axis=-1))
+            action_drift = float(jnp.mean(jnp.linalg.norm(current_actions - base_actions, axis=-1)))
             
             wandb.log({
                 "am/loss": info['loss'],
@@ -249,20 +267,26 @@ def main(_):
                 "monitor/action_drift": action_drift,
                 "am_step": i
             })
-            
-        if i % FLAGS.am_eval_interval == 0:
+
+            # --- B. Run Evaluation ---
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
             eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
             
             try: normalized_score = env.unwrapped.get_normalized_score(eval_score) * 100.0
             except: normalized_score = eval_score
             
+            # Update History & Calculate MA
+            score_history.append(normalized_score)
+            ma_score = np.mean(score_history)
+
             wandb.log({
                 "am/raw_score": eval_score,
                 "am/norm_score": normalized_score,
+                "am/norm_score_ma": ma_score,
                 "am_step": i
             })
-            pbar.set_description(f"AM (Drift:{action_drift:.2f}|Score:{normalized_score:.1f})")
+            
+            pbar.set_description(f"AM (Drift:{action_drift:.2f}|Score:{normalized_score:.1f}|MA:{ma_score:.1f})")
 
     # --- [NEW] Evaluate Final Agent ---
     print(f"[Seed {FLAGS.seed}] Profiling Final Agent...")
