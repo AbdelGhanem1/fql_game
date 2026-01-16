@@ -245,7 +245,7 @@ def main(_):
     window_size = 3
     score_history = deque(maxlen=window_size)
     
-    print(f"[Seed {FLAGS.seed}] Moving Average Window: {window_size} points (Horizon: {SMOOTHING_HORIZON_STEPS} steps)")
+    print(f"[Seed {FLAGS.seed}] Moving Average Window: {window_size} points ")
 
     for i in pbar:
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
