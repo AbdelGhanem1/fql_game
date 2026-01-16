@@ -1,15 +1,15 @@
 import os
 
-# --- [FIX START] ---
-# Fix for "ValueError: Key backend..."
-# We must set the backend to 'Agg' before importing pyplot.
-# This tells matplotlib "we are saving images to files, not showing a window".
+# --- [CRITICAL FIX] ---
+# Kaggle/Jupyter sets 'MPLBACKEND' to a custom value (module://matplotlib_inline...)
+# that crashes headless scripts. We must remove it BEFORE importing matplotlib.
+if 'MPLBACKEND' in os.environ:
+    del os.environ['MPLBACKEND']
+# ----------------------
+
 import matplotlib
-try:
-    matplotlib.use('Agg')
-except:
-    pass
-# --- [FIX END] ---
+# Now it is safe to set the backend to Agg (non-interactive, for saving files)
+matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
 import pickle
