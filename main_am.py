@@ -242,7 +242,7 @@ def main(_):
     
 
     
-    window_size = 3
+    window_size = 10
     score_history = deque(maxlen=window_size)
     
     print(f"[Seed {FLAGS.seed}] Moving Average Window: {window_size} points ")
