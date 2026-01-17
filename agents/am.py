@@ -188,30 +188,34 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             # Clip actions before IQL critic
             a_clipped = jnp.clip(a, -1.0, 1.0)
             
-            # [CRITICAL UPDATE] LCB Calculation
             # 1. Get all ensemble Q-values
             qs = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
             
-            # 2. Stack to (Num_Ensembles, Batch_Size)
-            # Ensure qs is iterable. If single tensor, this will fail (but IQL is set to 10)
             if isinstance(qs, (list, tuple)):
                 qs_stack = jnp.stack(qs, axis=0)
             else:
-                qs_stack = qs[None, ...] # Fallback
+                qs_stack = qs[None, ...] 
 
-            # 3. Compute Stats
+            # 2. Compute Stats
             q_mean = jnp.mean(qs_stack, axis=0)
-            q_std = jnp.std(qs_stack, axis=0)
             
-            # 4. Apply Uncertainty Penalty (LCB)
-            # Lower Confidence Bound = Mean - Beta * Std
-            # Large Beta = Stay closer to data support
+            # [CRITICAL FIX] Stabilize Std Gradient
+            # If critics agree perfectly, variance is 0. 
+            # The gradient of sqrt(0) is infinite. We add 1e-6 to prevent this.
+            q_var = jnp.var(qs_stack, axis=0)
+            q_std = jnp.sqrt(q_var + 1e-6)
+            
+            # 3. Apply Uncertainty Penalty (LCB)
             beta = self.config.get('uncertainty_beta', 2.0)
             robust_q = q_mean - beta * q_std
             
             return jnp.sum(robust_q) * self.config['reward_scale']
 
         grad_q = jax.grad(reward_fn)(X_final_clean)
+        
+        # [Additional Safety] Explicitly sanitize gradients to prevent NaNs propagating
+        grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)
+        
         adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
         
         avg_reward = reward_fn(X_final_clean) / (self.config['reward_scale'] * observations.shape[0])

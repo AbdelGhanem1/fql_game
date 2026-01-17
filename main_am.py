@@ -66,7 +66,7 @@ def get_full_config():
         'agent_name': 'iql', 'lr': 3e-4, 'batch_size': 256,
         'actor_hidden_dims': (256, 256), 'value_hidden_dims': (256, 256),
         'layer_norm': True, 'actor_layer_norm': False,
-        'discount': 0.99, 'tau': 0.005, 'expectile': 0.7, 
+        'discount': 0.99, 'tau': 0.005, 'expectile': 0.9, 
         'actor_loss': 'awr', 'alpha': 10.0, 'const_std': True, 'encoder': None,
     })
     am = get_am_config()
