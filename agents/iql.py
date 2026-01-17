@@ -233,7 +233,7 @@ class IQLAgent(flax.struct.PyTreeNode):
         critic_def = Value(
             hidden_dims=config['value_hidden_dims'],
             layer_norm=config['layer_norm'],
-            num_ensembles=10, 
+            num_ensembles=5, 
             encoder=encoders.get('critic'),
         )
         
