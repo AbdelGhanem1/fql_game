@@ -35,7 +35,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
 
         # --- 1. Extract Base Parameters ---
         params = base_agent.network.params
-        # Handle potential key variations in the Base Agent
         if 'modules_actor_bc_flow' in params:
             base_params = params['modules_actor_bc_flow']
         elif 'modules_flow_actor' in params:
@@ -46,87 +45,67 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
         
-        # --- 2. Initialize Student Parameters (Randomly) ---
-        # Note: We take ['params'] immediately
+        # --- 2. Initialize Student Parameters ---
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
         
         # --- 3. [SAFE STRATEGY] Inject Base Weights ---
-        # We explicitly check where the parameters live to ensure they are actually copied.
+        print("\n=== ADJOINT MATCHING INITIALIZATION ===")
         if 'student_policy' in init_params:
             init_params['student_policy'] = base_params
-            print(f"✅ [AdjointMatching] Successfully initialized 'student_policy' from Base Agent.")
+            print(f"✅ Key Match: Injected weights into 'student_policy'.")
         elif 'modules_student_policy' in init_params:
             init_params['modules_student_policy'] = base_params
-            print(f"✅ [AdjointMatching] Successfully initialized 'modules_student_policy' from Base Agent.")
+            print(f"✅ Key Match: Injected weights into 'modules_student_policy'.")
         else:
-            # CRITICAL: Raise error instead of failing silently
-            available_keys = list(init_params.keys())
+            # CRITICAL: Fail loudly if we can't find the key
             raise ValueError(
-                f"❌ Parameter Mismatch! Could not find 'student_policy' key to inject weights.\n"
-                f"   Available keys in init_params: {available_keys}"
+                f"❌ FATAL ERROR: Could not find target key for weights.\n"
+                f"   Available keys: {list(init_params.keys())}"
             )
 
-        # [DEBUG] Verify Parameter Structure
-        print("\n=== DEBUG: PARAMETER VERIFICATION ===")
-        print(f"Base Param Keys: {base_params.keys()}")
+        # --- 4. Create TrainState (Wraps the params we just modified) ---
+        network = TrainState.create(network_def, init_params, tx=network_tx)
+
+        # --- 5. [DEBUG] Verify Output Consistency ---
+        # We do this AFTER creating 'network' so we can use the safe .select() API
+        print("--- Verifying Output Similarity ---")
         
-        # Check if we successfully injected the keys
-        if 'student_policy' in init_params:
-            stud_params = init_params['student_policy']
-        elif 'modules_student_policy' in init_params:
-            stud_params = init_params['modules_student_policy']
-        else:
-             stud_params = {} # Should trigger error below if empty
-
-        print(f"Student Param Keys: {stud_params.keys()}")
-            
-        # Check 1: Do keys match?
-        base_k = set(base_params.keys())
-        stud_k = set(stud_params.keys())
-        if base_k != stud_k:
-            print(f"❌ MISMATCH! Keys do not match.\n   Base only: {base_k - stud_k}\n   Student only: {stud_k - base_k}")
-        else:
-            print("✅ Top-level parameter keys match.")
-
-        # [DEBUG] Verify Output Consistency
-        # Run a dummy forward pass on both networks with the SAME input
         dummy_obs = ex_observations[:1]
         dummy_act = ex_actions[:1]
         dummy_t = jnp.zeros((1, 1))
 
-        # 1. Compute Base Drift
-        # Note: We rely on the base agent's existing structure
+        # A. Compute Base Drift (using existing logic)
         if hasattr(base_agent.network, 'select'):
              v_base = base_agent.network.select('actor_bc_flow')(dummy_obs, dummy_act, dummy_t)
         else:
-             # Fallback: Use standard apply if select is missing
-             # We assume standard Flax TrainState structure here
-             v_base = base_agent.network.apply_fn(
+             # Fallback for standard TrainStates
+             v_base = base_agent.network.apply(
                 {'params': base_agent.network.params},
                 dummy_obs, dummy_act, dummy_t,
-                method=lambda m: m['actor_bc_flow'](dummy_obs, dummy_act, dummy_t)
+                method=lambda m: m.actor_bc_flow(dummy_obs, dummy_act, dummy_t) 
+                # Note: assumed attribute access if [] fails, but select path usually taken
             )
 
-        # 2. Compute Student Drift
-        # [FIXED] Removed arguments from apply(), allowing lambda to capture them from scope
-        v_student = network_def.apply(
-            {'params': init_params},
-            method=lambda m: m['student_policy'](dummy_obs, dummy_act, dummy_t)
+        # B. Compute Student Drift
+        # We use network.select, explicitly passing the params we just loaded
+        v_student = network.select('student_policy')(
+            dummy_obs, dummy_act, dummy_t, params=network.params
         )
 
         diff = jnp.mean((v_base - v_student) ** 2)
-        print(f"Target Drift (Base): {v_base[0, :3]}")
-        print(f"Pred Drift (Student): {v_student[0, :3]}")
-        print(f"Initial Drift MSE: {diff:.6f}")
+        print(f"   Target Drift (Base) First Dim: {float(v_base[0, 0]):.4f}")
+        print(f"   Pred Drift (Student) First Dim: {float(v_student[0, 0]):.4f}")
+        print(f"   MSE Diff: {float(diff):.6f}")
         
         if diff > 1e-5:
-            print("❌ CRITICAL FAIL: Student does not match Base output!")
-            # raise ValueError("Student initialization failed verification.")
+            print("❌ CRITICAL FAIL: Student outputs do not match Base Agent!")
+            # raise ValueError("Initialization Verification Failed.")
         else:
-            print("✅ SUCCESS: Student output matches Base output exactly.")
+            print("✅ SUCCESS: Student is a perfect clone of Base Agent.")
         
-        print("=====================================\n")
+        print("=======================================\n")
+
         return cls(rng=rng, 
                    network=network, 
                    base_network=base_agent.network, 
