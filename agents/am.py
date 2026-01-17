@@ -282,7 +282,7 @@ def get_config():
     # Placeholder config; values will be populated from FLAGS in main.py
     config = ml_collections.ConfigDict(dict(
         agent_name='adjoint_matching',
-        lr=3e-4,
+        lr=0.0,
         batch_size=256,
         actor_hidden_dims=(512, 512, 512, 512),
         actor_layer_norm=False,
