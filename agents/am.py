@@ -33,7 +33,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             )
         })
 
+        # --- 1. Extract Base Parameters ---
         params = base_agent.network.params
+        # Handle potential key variations in the Base Agent
         if 'modules_actor_bc_flow' in params:
             base_params = params['modules_actor_bc_flow']
         elif 'modules_flow_actor' in params:
@@ -44,11 +46,27 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
         
+        # --- 2. Initialize Student Parameters (Randomly) ---
+        # Note: We take ['params'] immediately
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
         
-        init_params['modules_student_policy'] = base_params
-        
+        # --- 3. [SAFE STRATEGY] Inject Base Weights ---
+        # We explicitly check where the parameters live to ensure they are actually copied.
+        if 'student_policy' in init_params:
+            init_params['student_policy'] = base_params
+            print(f"✅ [AdjointMatching] Successfully initialized 'student_policy' from Base Agent.")
+        elif 'modules_student_policy' in init_params:
+            init_params['modules_student_policy'] = base_params
+            print(f"✅ [AdjointMatching] Successfully initialized 'modules_student_policy' from Base Agent.")
+        else:
+            # CRITICAL: Raise error instead of failing silently
+            available_keys = list(init_params.keys())
+            raise ValueError(
+                f"❌ Parameter Mismatch! Could not find 'student_policy' key to inject weights.\n"
+                f"   Available keys in init_params: {available_keys}"
+            )
+
         network = TrainState.create(network_def, init_params, tx=network_tx)
 
         return cls(rng=rng, 
