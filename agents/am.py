@@ -68,6 +68,63 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             )
 
         network = TrainState.create(network_def, init_params, tx=network_tx)
+        # [DEBUG] Verify Parameter Structure
+        print("\n=== DEBUG: PARAMETER VERIFICATION ===")
+        print(f"Base Param Keys: {base_params.keys()}")
+        if 'modules_student_policy' in init_params:
+            stud_params = init_params['modules_student_policy']
+            print(f"Student Param Keys: {stud_params.keys()}")
+            
+            # Check 1: Do keys match?
+            base_k = set(base_params.keys())
+            stud_k = set(stud_params.keys())
+            if base_k != stud_k:
+                print(f"❌ MISMATCH! Keys do not match.\n   Base only: {base_k - stud_k}\n   Student only: {stud_k - base_k}")
+            else:
+                print("✅ Top-level parameter keys match.")
+
+        # [DEBUG] Verify Output Consistency
+        # Run a dummy forward pass on both networks with the SAME input
+        dummy_obs = ex_observations[:1]
+        dummy_act = ex_actions[:1]
+        dummy_t = jnp.zeros((1, 1))
+
+        # 1. Compute Base Drift
+        if hasattr(base_agent.network, 'select'):
+             v_base = base_agent.network.select('actor_bc_flow')(dummy_obs, dummy_act, dummy_t)
+        else:
+             # Fallback if select doesn't exist on base
+             v_base = base_agent.network.apply(
+                {'params': base_agent.network.params},
+                dummy_obs, dummy_act, dummy_t,
+                method=lambda m: m['actor_bc_flow'](dummy_obs, dummy_act, dummy_t)
+            )
+
+        # 2. Compute Student Drift (using the init_params we just created)
+        # We must reconstruct the full params dict for the apply call
+        test_params = init_params
+        
+        # Manually call apply using the definition
+        v_student = network_def.apply(
+            {'params': test_params},
+            dummy_obs, dummy_act, dummy_t,
+            method=lambda m: m['student_policy'](dummy_obs, dummy_act, dummy_t)
+        )
+
+        diff = jnp.mean((v_base - v_student) ** 2)
+        print(f"Target Drift (Base): {v_base[0, :3]}")
+        print(f"Pred Drift (Student): {v_student[0, :3]}")
+        print(f"Initial Drift MSE: {diff:.6f}")
+        
+        if diff > 1e-5:
+            print("❌ CRITICAL FAIL: Student does not match Base output!")
+            # raise ValueError("Student initialization failed verification.")
+        else:
+            print("✅ SUCCESS: Student output matches Base output exactly.")
+        
+        print("=====================================\n")
+
+        network = TrainState.create(network_def, init_params, tx=network_tx)
 
         return cls(rng=rng, 
                    network=network, 
