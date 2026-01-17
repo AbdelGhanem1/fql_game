@@ -282,7 +282,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(dict(
         agent_name='adjoint_matching',
-        lr=3e-5,
+        lr=1e-5,
         batch_size=256,
         actor_hidden_dims=(512, 512, 512, 512),
         actor_layer_norm=False,
