@@ -262,6 +262,16 @@ class IQLAgent(flax.struct.PyTreeNode):
 
         params = network_params
         params['modules_target_critic'] = params['modules_critic']
+        # DIAGNOSTIC: Check if ensemble heads are different
+        p_critic = network.params['modules_critic']
+        # Assuming structure is {Dense_0: {kernel: (10, ...)}}
+        # Let's check the variance of the first layer's kernel across the ensemble dimension (dim 0)
+        first_layer_key = list(p_critic.keys())[0] # e.g. 'Dense_0'
+        kernel_var = jnp.var(p_critic[first_layer_key]['kernel'], axis=0).mean()
+        print(f"DEBUG: Critic Ensemble Variance at Init: {kernel_var:.6f}")
+
+        if kernel_var < 1e-6:
+            print("WARNING: All critics were initialized with identical weights! Uncertainty will be 0.")
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
 
