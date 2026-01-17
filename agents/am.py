@@ -67,21 +67,27 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                 f"   Available keys in init_params: {available_keys}"
             )
 
-        network = TrainState.create(network_def, init_params, tx=network_tx)
         # [DEBUG] Verify Parameter Structure
         print("\n=== DEBUG: PARAMETER VERIFICATION ===")
         print(f"Base Param Keys: {base_params.keys()}")
-        if 'modules_student_policy' in init_params:
+        
+        # Check if we successfully injected the keys
+        if 'student_policy' in init_params:
+            stud_params = init_params['student_policy']
+        elif 'modules_student_policy' in init_params:
             stud_params = init_params['modules_student_policy']
-            print(f"Student Param Keys: {stud_params.keys()}")
+        else:
+             stud_params = {} # Should trigger error below if empty
+
+        print(f"Student Param Keys: {stud_params.keys()}")
             
-            # Check 1: Do keys match?
-            base_k = set(base_params.keys())
-            stud_k = set(stud_params.keys())
-            if base_k != stud_k:
-                print(f"❌ MISMATCH! Keys do not match.\n   Base only: {base_k - stud_k}\n   Student only: {stud_k - base_k}")
-            else:
-                print("✅ Top-level parameter keys match.")
+        # Check 1: Do keys match?
+        base_k = set(base_params.keys())
+        stud_k = set(stud_params.keys())
+        if base_k != stud_k:
+            print(f"❌ MISMATCH! Keys do not match.\n   Base only: {base_k - stud_k}\n   Student only: {stud_k - base_k}")
+        else:
+            print("✅ Top-level parameter keys match.")
 
         # [DEBUG] Verify Output Consistency
         # Run a dummy forward pass on both networks with the SAME input
@@ -90,24 +96,22 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         dummy_t = jnp.zeros((1, 1))
 
         # 1. Compute Base Drift
+        # Note: We rely on the base agent's existing structure
         if hasattr(base_agent.network, 'select'):
              v_base = base_agent.network.select('actor_bc_flow')(dummy_obs, dummy_act, dummy_t)
         else:
-             # Fallback if select doesn't exist on base
-             v_base = base_agent.network.apply(
+             # Fallback: Use standard apply if select is missing
+             # We assume standard Flax TrainState structure here
+             v_base = base_agent.network.apply_fn(
                 {'params': base_agent.network.params},
                 dummy_obs, dummy_act, dummy_t,
                 method=lambda m: m['actor_bc_flow'](dummy_obs, dummy_act, dummy_t)
             )
 
-        # 2. Compute Student Drift (using the init_params we just created)
-        # We must reconstruct the full params dict for the apply call
-        test_params = init_params
-        
-        # Manually call apply using the definition
+        # 2. Compute Student Drift
+        # [FIXED] Removed arguments from apply(), allowing lambda to capture them from scope
         v_student = network_def.apply(
-            {'params': test_params},
-            dummy_obs, dummy_act, dummy_t,
+            {'params': init_params},
             method=lambda m: m['student_policy'](dummy_obs, dummy_act, dummy_t)
         )
 
@@ -123,9 +127,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             print("✅ SUCCESS: Student output matches Base output exactly.")
         
         print("=====================================\n")
-
-        network = TrainState.create(network_def, init_params, tx=network_tx)
-
         return cls(rng=rng, 
                    network=network, 
                    base_network=base_agent.network, 
