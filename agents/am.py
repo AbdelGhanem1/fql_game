@@ -12,7 +12,7 @@ from utils.networks import ActorVectorField
 
 class AdjointMatchingAgent(flax.struct.PyTreeNode):
     """
-    Adjoint Matching Agent for Finetuning.
+    Adjoint Matching Agent for Finetuning with Robust LCB Guidance.
     """
     rng: Any
     network: Any             
@@ -33,7 +33,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             )
         })
 
-        # --- 1. Extract Base Parameters ---
+        # --- Extract Base Parameters ---
         params = base_agent.network.params
         if 'modules_actor_bc_flow' in params:
             base_params = params['modules_actor_bc_flow']
@@ -45,11 +45,11 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         network_tx = optax.adam(learning_rate=config['lr'])
         dummy_time = jnp.zeros((1, 1))
         
-        # --- 2. Initialize Student Parameters ---
+        # --- Initialize Student Parameters ---
         init_params = network_def.init(init_rng, 
                                       student_policy=(ex_observations[:1], ex_actions[:1], dummy_time))['params']
         
-        # --- 3. [SAFE STRATEGY] Inject Base Weights ---
+        # --- Inject Base Weights ---
         print("\n=== ADJOINT MATCHING INITIALIZATION ===")
         if 'student_policy' in init_params:
             init_params['student_policy'] = base_params
@@ -58,52 +58,36 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             init_params['modules_student_policy'] = base_params
             print(f"✅ Key Match: Injected weights into 'modules_student_policy'.")
         else:
-            # CRITICAL: Fail loudly if we can't find the key
-            raise ValueError(
-                f"❌ FATAL ERROR: Could not find target key for weights.\n"
-                f"   Available keys: {list(init_params.keys())}"
-            )
+            raise ValueError(f"❌ FATAL ERROR: Could not find target key. Keys: {list(init_params.keys())}")
 
-        # --- 4. Create TrainState (Wraps the params we just modified) ---
         network = TrainState.create(network_def, init_params, tx=network_tx)
 
-        # --- 5. [DEBUG] Verify Output Consistency ---
-        # We do this AFTER creating 'network' so we can use the safe .select() API
+        # --- Verify Output ---
         print("--- Verifying Output Similarity ---")
-        
         dummy_obs = ex_observations[:1]
         dummy_act = ex_actions[:1]
         dummy_t = jnp.zeros((1, 1))
 
-        # A. Compute Base Drift (using existing logic)
         if hasattr(base_agent.network, 'select'):
              v_base = base_agent.network.select('actor_bc_flow')(dummy_obs, dummy_act, dummy_t)
         else:
-             # Fallback for standard TrainStates
              v_base = base_agent.network.apply(
                 {'params': base_agent.network.params},
                 dummy_obs, dummy_act, dummy_t,
                 method=lambda m: m.actor_bc_flow(dummy_obs, dummy_act, dummy_t) 
-                # Note: assumed attribute access if [] fails, but select path usually taken
             )
 
-        # B. Compute Student Drift
-        # We use network.select, explicitly passing the params we just loaded
         v_student = network.select('student_policy')(
             dummy_obs, dummy_act, dummy_t, params=network.params
         )
 
         diff = jnp.mean((v_base - v_student) ** 2)
-        print(f"   Target Drift (Base) First Dim: {float(v_base[0, 0]):.4f}")
-        print(f"   Pred Drift (Student) First Dim: {float(v_student[0, 0]):.4f}")
         print(f"   MSE Diff: {float(diff):.6f}")
         
         if diff > 1e-5:
             print("❌ CRITICAL FAIL: Student outputs do not match Base Agent!")
-            # raise ValueError("Initialization Verification Failed.")
         else:
             print("✅ SUCCESS: Student is a perfect clone of Base Agent.")
-        
         print("=======================================\n")
 
         return cls(rng=rng, 
@@ -114,10 +98,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        """
-        Sample actions by solving the ODE (Euler method) using the Student Policy.
-        Handles both batched (N, D) and unbatched (D,) inputs.
-        """
         is_single_input = False
         if observations.ndim == 1:
             is_single_input = True
@@ -205,11 +185,31 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         X_final_clean = X_pre_final + v_base_final * dt
         
         def reward_fn(a):
-            # [CRITICAL FIX] Clip actions before IQL critic to ensure stability
+            # Clip actions before IQL critic
             a_clipped = jnp.clip(a, -1.0, 1.0)
-            q1, q2 = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
-            min_q = jnp.minimum(q1, q2)
-            return jnp.sum(min_q) * self.config['reward_scale']
+            
+            # [CRITICAL UPDATE] LCB Calculation
+            # 1. Get all ensemble Q-values
+            qs = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
+            
+            # 2. Stack to (Num_Ensembles, Batch_Size)
+            # Ensure qs is iterable. If single tensor, this will fail (but IQL is set to 10)
+            if isinstance(qs, (list, tuple)):
+                qs_stack = jnp.stack(qs, axis=0)
+            else:
+                qs_stack = qs[None, ...] # Fallback
+
+            # 3. Compute Stats
+            q_mean = jnp.mean(qs_stack, axis=0)
+            q_std = jnp.std(qs_stack, axis=0)
+            
+            # 4. Apply Uncertainty Penalty (LCB)
+            # Lower Confidence Bound = Mean - Beta * Std
+            # Large Beta = Stay closer to data support
+            beta = self.config.get('uncertainty_beta', 2.0)
+            robust_q = q_mean - beta * q_std
+            
+            return jnp.sum(robust_q) * self.config['reward_scale']
 
         grad_q = jax.grad(reward_fn)(X_final_clean)
         adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
@@ -259,14 +259,11 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             preds = jax.vmap(get_drift)(jnp.arange(n_steps), traj[:-1])
             
-            # [CRITICAL FIX] Apply 4/sigma^2 weighting (Eq. 217 in AM Paper)
             steps = jnp.arange(n_steps)
             t_float = steps / n_steps
             sigma_sq = 2 * (1 - t_float + dt) / (t_float + dt)
-            
-            # Weight is 4 / sigma^2. Added 1e-5 to prevent division by zero (though t < 1 here)
             weights = 4.0 / (sigma_sq + 1e-5)
-            weights = weights[:, None] # Broadcast to (n_steps, batch_size)
+            weights = weights[:, None]
             
             sq_err = jnp.sum((preds - targets)**2, axis=-1)
             weighted_sq_err = weights * sq_err
@@ -279,19 +276,18 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         return self.replace(network=new_network, rng=rng), info
 
 def get_config():
-    # Placeholder config; values will be populated from FLAGS in main.py
     config = ml_collections.ConfigDict(dict(
         agent_name='adjoint_matching',
-        lr=3e-6,
+        lr=3e-4,
         batch_size=256,
         actor_hidden_dims=(512, 512, 512, 512),
         actor_layer_norm=False,
-        # Hyperparameters now default to placeholders
         am_steps=ml_collections.config_dict.placeholder(int),
         reward_scale=ml_collections.config_dict.placeholder(float),
         LCT=ml_collections.config_dict.placeholder(float),
         q_grad_clip=ml_collections.config_dict.placeholder(float),
         vjp_clip=ml_collections.config_dict.placeholder(float),
         action_dim=ml_collections.config_dict.placeholder(int),
+        uncertainty_beta=ml_collections.config_dict.placeholder(float), # NEW
     ))
     return config

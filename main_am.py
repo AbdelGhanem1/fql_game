@@ -1,24 +1,14 @@
 import os
 
-# --- [CRITICAL FIX] ---
-# Kaggle/Jupyter sets 'MPLBACKEND' to a custom value (module://matplotlib_inline...)
-# that crashes headless scripts. We must remove it BEFORE importing matplotlib.
 if 'MPLBACKEND' in os.environ:
     del os.environ['MPLBACKEND']
-# ----------------------
-
 import matplotlib
-# Now it is safe to set the backend to Agg (non-interactive, for saving files)
 matplotlib.use('Agg')
-
 import matplotlib.pyplot as plt
 import pickle
 import random
 import numpy as np
-
 from collections import deque
-
-
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -62,6 +52,9 @@ flags.DEFINE_float('LCT', 10.0, 'Large Deviation Truncation threshold for loss.'
 flags.DEFINE_float('vjp_clip', 10.0, 'Clip value for the vector-Jacobian product in adjoint.')
 flags.DEFINE_integer('ode_steps', 20, 'Number of ODE steps for AM training and inference.')
 
+# [NEW] Uncertainty Parameter
+flags.DEFINE_float('uncertainty_beta', 2.0, 'LCB Beta: Penalty for ensemble disagreement.')
+
 def get_full_config():
     flow = ml_collections.ConfigDict({
         'agent_name': 'flow_bc', 'lr': 3e-4, 'batch_size': 256,
@@ -85,42 +78,25 @@ config_flags.DEFINE_config_dict('config', get_full_config(), 'Full configuration
 def set_global_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
-    # JAX seeding is handled by passing the key, but we set python/numpy for dataloaders
 
 def log_reward_comparison(base_trajs, finetuned_trajs, wandb_key="comparison/reward_profile"):
-    """
-    Plots the mean reward per timestep (with std dev shading) for Base vs Finetuned.
-    """
     def get_curve_stats(trajs):
-        # 1. Extract all reward lists
         all_rewards = [t['reward'] for t in trajs]
-        
-        # 2. Handle variable episode lengths by padding with NaN
         max_len = max(len(r) for r in all_rewards)
         padded_rewards = np.full((len(all_rewards), max_len), np.nan)
-        
         for i, r in enumerate(all_rewards):
             padded_rewards[i, :len(r)] = r
-            
-        # 3. Compute Mean and Std (ignoring NaNs for shorter episodes)
         mean = np.nanmean(padded_rewards, axis=0)
         std = np.nanstd(padded_rewards, axis=0)
         steps = np.arange(max_len)
-        
         return steps, mean, std
 
-    # Get stats
     b_steps, b_mean, b_std = get_curve_stats(base_trajs)
     f_steps, f_mean, f_std = get_curve_stats(finetuned_trajs)
 
-    # Create Plot
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Plot Base
     ax.plot(b_steps, b_mean, label=f'Base Model (Area={np.nansum(b_mean):.1f})', color='blue', alpha=0.8)
     ax.fill_between(b_steps, b_mean - b_std, b_mean + b_std, color='blue', alpha=0.15)
-    
-    # Plot Finetuned
     ax.plot(f_steps, f_mean, label=f'Finetuned AM (Area={np.nansum(f_mean):.1f})', color='red', alpha=0.8)
     ax.fill_between(f_steps, f_mean - f_std, f_mean + f_std, color='red', alpha=0.15)
     
@@ -129,46 +105,38 @@ def log_reward_comparison(base_trajs, finetuned_trajs, wandb_key="comparison/rew
     ax.set_ylabel("Step Reward")
     ax.legend()
     ax.grid(True, alpha=0.3)
-
-    # Log to WandB
     wandb.log({wandb_key: wandb.Image(fig)})
-    
-    # Close plot to free memory
     plt.close(fig)
 
 def main(_):
-    # Ensure full reproducibility
     set_global_seed(FLAGS.seed)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
-    
-    # Init WandB (expecting env vars for grouping)
     wandb.init(config=FLAGS.config.to_dict())
     
-    # --- 1. Init Environment ---
     env, eval_env, train_dataset_dict, _ = make_env_and_datasets(FLAGS.env_name, frame_stack=None)
     train_dataset = Dataset.create(**train_dataset_dict)
     example_batch = train_dataset.sample(1)
     
-    # --- 2. Base Training (or Load) ---
     flow_agent = None
     critic_agent = None
     
     seed_base_flow_path = os.path.join(FLAGS.save_dir, f'base_flow_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
-    seed_base_critic_path = os.path.join(FLAGS.save_dir, f'base_critic_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
+    # Use a different name if retraining with 10 ensembles to avoid confusion
+    seed_base_critic_path = os.path.join(FLAGS.save_dir, f'base_critic_ens10_{FLAGS.env_name}_seed{FLAGS.seed}.pkl')
 
     if FLAGS.pretrained_flow_path != '':
         load_flow = FLAGS.pretrained_flow_path
         load_critic = FLAGS.pretrained_critic_path
         print(f"[Seed {FLAGS.seed}] Loading provided Base Agents:\n  - {load_flow}")
-    elif os.path.exists(seed_base_flow_path):
+    elif os.path.exists(seed_base_critic_path):
         load_flow = seed_base_flow_path
         load_critic = seed_base_critic_path
-        print(f"[Seed {FLAGS.seed}] Found existing Base Agents for this seed! Skipping Base Training.\n  - {load_flow}")
+        print(f"[Seed {FLAGS.seed}] Found existing Base Agents! Skipping Base Training.\n  - {load_critic}")
     else:
         load_flow = None
         load_critic = None
 
-    if load_flow:
+    if load_flow and load_critic:
         with open(load_flow, 'rb') as f:
             flow_state = pickle.load(f)
             flow_agent = FlowBCAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.flow)
@@ -178,7 +146,7 @@ def main(_):
             critic_agent = IQLAgent.create(FLAGS.seed, example_batch['observations'], example_batch['actions'], FLAGS.config.iql)
             critic_agent = flax.serialization.from_state_dict(critic_agent, critic_state)
     else:
-        print(f"[Seed {FLAGS.seed}] No existing model found. Starting Base Training ...")
+        print(f"[Seed {FLAGS.seed}] No valid model found. Starting Base Training (Ensemble=10)...")
         flow_agent, critic_agent = train_base_models(
             env_name=FLAGS.env_name,
             seed=FLAGS.seed,
@@ -202,6 +170,7 @@ def main(_):
     FLAGS.config.am.q_grad_clip = FLAGS.q_grad_clip
     FLAGS.config.am.vjp_clip = FLAGS.vjp_clip
     FLAGS.config.am.am_steps = FLAGS.ode_steps
+    FLAGS.config.am.uncertainty_beta = FLAGS.uncertainty_beta # [NEW]
 
     am_agent = AdjointMatchingAgent.create(
         seed=FLAGS.seed,
@@ -216,12 +185,18 @@ def main(_):
     monitor_batch = train_dataset.sample(32)
     monitor_obs = monitor_batch['observations']
     base_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
-    q1_base, q2_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
-    mean_base_q = jnp.mean(jnp.minimum(q1_base, q2_base))
+    
+    # Check baseline stats
+    qs_base = critic_agent.network.select('target_critic')(monitor_obs, base_actions)
+    if isinstance(qs_base, (list, tuple)):
+        qs_base = jnp.stack(qs_base, axis=0)
+        mean_base_q = jnp.mean(jnp.min(qs_base, axis=0)) # Conservative baseline
+    else:
+        mean_base_q = jnp.mean(qs_base)
     
     wandb.log({"monitor/baseline_q": mean_base_q})
 
-    # --- [NEW] Evaluate Base Agent ---
+    # --- Evaluate Base Agent ---
     print(f"[Seed {FLAGS.seed}] Profiling Base Agent...")
     base_stats, base_trajs, _ = evaluate(
         agent=flow_agent, 
@@ -232,31 +207,28 @@ def main(_):
     wandb.log({"base/final_norm_score": base_stats.get('episode.normalized_return', 0)})
 
     # --- 5. Finetuning Loop ---
-    print(f"[Seed {FLAGS.seed}] Starting AM Finetuning (Scale: {FLAGS.reward_scale}, 10k steps)...")
+    print(f"[Seed {FLAGS.seed}] Starting AM Finetuning (Beta: {FLAGS.uncertainty_beta})...")
     
-    pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc=f"AM-Scale-{FLAGS.reward_scale}-Seed-{FLAGS.seed}", mininterval=5.0, ncols=100)
-
-    # Initialize variables
-    action_drift = 0.0
-    normalized_score = 0.0
-    
-
-    
-    window_size = 10
-    score_history = deque(maxlen=window_size)
-    
-    print(f"[Seed {FLAGS.seed}] Moving Average Window: {window_size} points ")
+    pbar = tqdm.tqdm(range(1, FLAGS.am_steps + 1), smoothing=0.1, desc=f"AM-B{FLAGS.uncertainty_beta}", mininterval=5.0, ncols=100)
+    score_history = deque(maxlen=10)
 
     for i in pbar:
         batch = train_dataset.sample(FLAGS.config.am.batch_size)
         am_agent, info = am_agent.update(batch)
         
         if i % FLAGS.am_eval_interval == 0:
-            # --- A. Monitor Metrics ---
+            # Monitor Metrics
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
-            q1_curr, q2_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
-            mean_curr_q = jnp.mean(jnp.minimum(q1_curr, q2_curr))
+            qs_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
             
+            if isinstance(qs_curr, (list, tuple)):
+                qs_curr_stack = jnp.stack(qs_curr, axis=0)
+                mean_curr_q = jnp.mean(jnp.min(qs_curr_stack, axis=0))
+                std_curr_q = jnp.mean(jnp.std(qs_curr_stack, axis=0)) # Average uncertainty
+            else:
+                mean_curr_q = jnp.mean(qs_curr)
+                std_curr_q = 0.0
+
             q_improvement = mean_curr_q - mean_base_q
             action_drift = float(jnp.mean(jnp.linalg.norm(current_actions - base_actions, axis=-1)))
             
@@ -264,17 +236,17 @@ def main(_):
                 "am/loss": info['loss'],
                 "monitor/delta_q": q_improvement,
                 "monitor/action_drift": action_drift,
+                "monitor/uncertainty_std": std_curr_q,
                 "am_step": i
             })
 
-            # --- B. Run Evaluation ---
+            # Run Evaluation
             metrics, _, _ = evaluate(am_agent, eval_env, num_eval_episodes=FLAGS.eval_episodes, eval_temperature=FLAGS.eval_temperature)
             eval_score = metrics.get('episode.return', metrics.get('evaluation/return', -1000))
             
             try: normalized_score = env.unwrapped.get_normalized_score(eval_score) * 100.0
             except: normalized_score = eval_score
             
-            # Update History & Calculate MA
             score_history.append(normalized_score)
             ma_score = np.mean(score_history)
 
@@ -287,7 +259,7 @@ def main(_):
             
             pbar.set_description(f"AM (Drift:{action_drift:.2f}|Score:{normalized_score:.1f}|MA:{ma_score:.1f})")
 
-    # --- [NEW] Evaluate Final Agent ---
+    # --- Evaluate Final Agent ---
     print(f"[Seed {FLAGS.seed}] Profiling Final Agent...")
     final_stats, final_trajs, _ = evaluate(
         agent=am_agent, 
@@ -296,9 +268,7 @@ def main(_):
         eval_temperature=FLAGS.eval_temperature
     )
 
-    # Generate and Upload the Comparison Plot
     log_reward_comparison(base_trajs, final_trajs)
-
     print("Comparison plot uploaded to WandB.")
 
 if __name__ == '__main__':
