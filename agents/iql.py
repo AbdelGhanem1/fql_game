@@ -233,7 +233,7 @@ class IQLAgent(flax.struct.PyTreeNode):
         critic_def = Value(
             hidden_dims=config['value_hidden_dims'],
             layer_norm=config['layer_norm'],
-            num_ensembles=10, # Robust ensemble size
+            num_ensembles=10, 
             encoder=encoders.get('critic'),
         )
         
@@ -262,16 +262,37 @@ class IQLAgent(flax.struct.PyTreeNode):
 
         params = network_params
         params['modules_target_critic'] = params['modules_critic']
-        # DIAGNOSTIC: Check if ensemble heads are different
-        p_critic = network.params['modules_critic']
-        # Assuming structure is {Dense_0: {kernel: (10, ...)}}
-        # Let's check the variance of the first layer's kernel across the ensemble dimension (dim 0)
-        first_layer_key = list(p_critic.keys())[0] # e.g. 'Dense_0'
-        kernel_var = jnp.var(p_critic[first_layer_key]['kernel'], axis=0).mean()
-        print(f"DEBUG: Critic Ensemble Variance at Init: {kernel_var:.6f}")
 
-        if kernel_var < 1e-6:
-            print("WARNING: All critics were initialized with identical weights! Uncertainty will be 0.")
+        # --- [FIXED] DIAGNOSTIC: Check Ensemble Diversity ---
+        try:
+            # 1. Get Critic Params
+            p_critic = network.params['modules_critic']
+            
+            # 2. Unwrap 'value_net' (created in Value.setup)
+            if 'value_net' in p_critic:
+                p_mlp = p_critic['value_net']
+                
+                # 3. Get First Layer (e.g., 'Dense_0')
+                # Flax implicitly names layers Dense_0, Dense_1 unless named otherwise
+                first_layer_key = sorted(list(p_mlp.keys()))[0] 
+                
+                # 4. Check Kernel Variance
+                if 'kernel' in p_mlp[first_layer_key]:
+                    kernel = p_mlp[first_layer_key]['kernel']
+                    # kernel shape: (10, input_dim, output_dim) due to ensemblize
+                    kernel_var = jnp.var(kernel, axis=0).mean()
+                    print(f"DEBUG: Critic Ensemble Variance at Init: {kernel_var:.6f}")
+                    
+                    if kernel_var < 1e-6:
+                        print("WARNING: ⚠️ Critics initialized identically! split_rngs might be missing.")
+                else:
+                    print(f"DEBUG: Could not find 'kernel' in {first_layer_key}")
+            else:
+                print("DEBUG: 'value_net' not found in critic params.")
+
+        except Exception as e:
+            print(f"DEBUG: Skipping variance check due to structure mismatch: {e}")
+        # ----------------------------------------------------
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
 
