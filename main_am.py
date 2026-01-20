@@ -215,23 +215,20 @@ def main(_):
         with open(seed_base_critic_path, 'wb') as f:
             pickle.dump(flax.serialization.to_state_dict(critic_agent), f)
 
+
+    q_scale = compute_robust_q_stats(critic_agent, train_dataset)
+
     # --- 3. Initialize Adjoint Matching ---
     FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
-    FLAGS.config.am.reward_scale = FLAGS.reward_scale
-    FLAGS.config.am.LCT = FLAGS.LCT
+    
+    
     FLAGS.config.am.q_grad_clip = FLAGS.q_grad_clip
     FLAGS.config.am.vjp_clip = FLAGS.vjp_clip
     FLAGS.config.am.am_steps = FLAGS.ode_steps
     FLAGS.config.am.uncertainty_beta = FLAGS.uncertainty_beta # [NEW]
-
-
-    # 1. Calculate Scale
-    q_scale = compute_robust_q_stats(critic_agent, train_dataset)
-
-    # 2. Update Config
-    # Assuming your config dictionary is mutable or you pass it to create
-    am_config['reward_scale'] = q_scale
-    am_config['LCT'] = 1.6 # Fixed LCT because we normalized the signal!
+    
+    FLAGS.config.am.reward_scale = q_scale
+    FLAGS.config.am.LCT = 1.6 # Fixed LCT because we normalized the signal!
 
     am_agent = AdjointMatchingAgent.create(
         seed=FLAGS.seed,
