@@ -179,51 +179,83 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             return jnp.sum(robust_q) / (self.config['reward_scale'] + 1e-5)
 
-        grad_q = jax.grad(reward_fn)(X_final_clean)
-        grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # [CRITICAL UPDATE FOR MAXIMIZATION]
-        # We define Adjoint = +Gradient (Direction of Ascent)
-        adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
+        adjoint = -jnp.nan_to_num(grad_q) # Removing 'q_grad_clip' to match paper strictly
         
         avg_reward = reward_fn(X_final_clean) / observations.shape[0]
 
         def scan_backward(adjoint, args):
-            i, a_curr = args
-            t_float = i / n_steps
-            t_safe = t_float + dt
+            i, x_curr = args # x_curr is now correctly aligned (starts at X_N)
+            t_float = (i + 1) / n_steps # Time corresponds to x_curr (t+h)
+            
+            # Note: t_safe logic in code used t_float + dt. 
+            # If t_float is now (i+1)/N, it represents the time of 'adjoint'.
+            # The dynamics are calculated at t_float.
             
             def drift_fn(a):
                 return self.get_base_drift(observations, a, t_float)
             
-            v_base, vjp_fn = jax.vjp(drift_fn, a_curr)
+            # Calculate dynamics at (adjoint, x_curr, t_float)
+            v_base, vjp_fn = jax.vjp(drift_fn, x_curr)
             
-            # Dynamics: d(adj)/dt = -2(grad v)^T adj + adj/t
-            # We calculate this term:
             term1_grads = vjp_fn(adjoint)[0]
-            term2_grads = - (1.0 / t_safe) * adjoint
+            term2_grads = - (1.0 / t_float) * adjoint
             
-            # vjp_total represents the NEGATIVE of the drift because we go backwards
-            vjp_total = jnp.clip(2 * term1_grads + term2_grads, -self.config['vjp_clip'], self.config['vjp_clip'])
+            # Eq 216: d(adj)/dt = -(2(grad v)^T adj - adj/t)
+            # vjp_total represents NEGATIVE drift (for backward step)
+            # Removing 'vjp_clip' to match paper strictly
+            vjp_total = 2 * term1_grads + term2_grads
             
-            # Backward Step: a_prev = a_curr + ( - d(adj)/dt ) * dt
-            # Since vjp_total capture the dynamics, we add it.
+            # Step from t+h to t
             adjoint_next = adjoint + vjp_total * dt
             
-            sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
+            # --- Target Calculation ---
+            # Use adjoint_next (approx a_t) and time t = i/n_steps
+            t_target = i / n_steps
+            sigma = jnp.sqrt(2 * (1 - t_target + dt) / (t_target + dt))
             
-            # [TARGET LOGIC FLIP]
-            # Target = Base + (Sigma^2 / 2) * Adjoint
-            # Since Adjoint = +Gradient, this ADDS the gradient to velocity.
-            target_v = v_base - (0.5 * sigma**2) * adjoint
+            # Re-fetch v_base at time t (since x_curr was at t+h)
+            # This requires X at time t. 
+            # Ideally, scan should carry (X_{t+h}, X_t).
+            # APPROXIMATION FIX:
+            # Since we calculate target for the loss at time t, 
+            # we need v_base(X_t) and adjoint(X_t).
+            # The scan output 'targets' matches indices 0..N-1.
+            # We cannot easily re-calculate v_base(X_t) here without passing X_t in args.
             
-            return adjoint_next, target_v
+            # BETTER APPROACH:
+            # We return adjoint_next. We compute the final target in the loss loop 
+            # or map it post-scan. 
+            # HOWEVER, to keep structure:
+            # We will return the raw adjoint_next and compute the full target later,
+            # OR assume v_base doesn't change drastically between t and t+h (Euler approx).
+            # To be STRICT: The target_v must be calculated outside or pass X_t in.
+            
+            return adjoint_next, adjoint_next # Return adjoint for external computation
 
-        indices = jnp.arange(n_steps)[::-1]
-        traj_inputs = traj[:-1][::-1]
-        _, targets = jax.lax.scan(scan_backward, adjoint, (indices, traj_inputs))
+        # 1. FIX INDEXING: Input starts at X_N (traj[-1]) down to X_1
+        indices = jnp.arange(n_steps)[::-1] # N-1 ... 0
+        traj_inputs = traj[1:][::-1]        # X_N ... X_1
         
-        return targets[::-1], avg_reward
+        _, adjoint_seq = jax.lax.scan(scan_backward, adjoint, (indices, traj_inputs))
+        
+        # adjoint_seq is ordered N-1 ... 0. Reverse to 0 ... N-1
+        adjoint_seq = adjoint_seq[::-1]
+        
+        # Now compute Targets using correct alignment:
+        # X_t (traj[:-1]), Time t, and Adjoint_t (adjoint_seq)
+        x_t_seq = traj[:-1]
+        times = jnp.linspace(0, 1.0 - dt, n_steps)
+        
+        # Vectorized target computation to ensure exact t matching
+        def compute_v_target(x, adj, t):
+            sigma = jnp.sqrt(2 * (1 - t + dt) / (t + dt))
+            v_b = self.get_base_drift(observations, x, t)
+            # Use the CORRECTED SIGN from previous turn:
+            return v_b - (0.5 * sigma**2) * adj
+            
+        final_targets = jax.vmap(compute_v_target)(x_t_seq, adjoint_seq, times)
+
+        return final_targets, avg_reward
 
     @jax.jit
     def update(self, batch):
