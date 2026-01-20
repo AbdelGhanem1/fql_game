@@ -226,7 +226,7 @@ def main(_):
 
 
     # 1. Calculate Scale
-    q_scale = compute_robust_q_stats(critic_agent, dataset)
+    q_scale = compute_robust_q_stats(critic_agent, train_dataset)
 
     # 2. Update Config
     # Assuming your config dictionary is mutable or you pass it to create
