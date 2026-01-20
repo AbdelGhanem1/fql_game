@@ -83,7 +83,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
         actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
-        # [CRITICAL] Use ode_steps, NOT am_steps
+        # Use ode_steps
         steps = self.config.get('ode_steps', 20) 
         dt = 1.0 / steps
         
@@ -135,6 +135,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             v_stud = self.get_ode_drift(self.network.params, 'student_policy', observations, a_t, t_float)
             
+            # Memoryless Drift
             drift = 2 * v_stud - (a_t / t_safe)
             sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
             
@@ -147,7 +148,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         _, traj_stacked = jax.lax.scan(scan_step, (a_0, rng), jnp.arange(n_steps))
         last_a = _[0]
         traj_full = jnp.concatenate([traj_stacked, last_a[None, ...]], axis=0)
-        return traj_full, None # Returning None as noise placeholder
+        return traj_full, None
 
     @functools.partial(jax.jit, static_argnames=('n_steps',))
     def compute_targets(self, traj, observations, n_steps, dt):
@@ -158,51 +159,33 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         X_final_clean = X_pre_final + v_base_final * dt
         
         def reward_fn(a):
-            # Clip actions before IQL critic
             a_clipped = jnp.clip(a, -1.0, 1.0)
-            
-            # 1. Get Q-values
             qs = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
             
-            # [FIXED LOGIC] Handle JAX Arrays that are ensembles (Shape: N, B, 1)
-            # If input is already stacked (e.g. from vmap), isinstance(list) is False.
+            # [FIXED] Handle Ensemble Shapes Correctly
             if isinstance(qs, (list, tuple)):
                 qs_stack = jnp.stack(qs, axis=0)
             elif qs.ndim > 1 and qs.shape[0] < 30: 
-                # Heuristic: If first dim is small (e.g. 2, 5, 10), it's the ensemble dim.
-                # Batch dim is usually 256+.
                 qs_stack = qs
             else:
-                # Single critic case
                 qs_stack = qs[None, ...] 
 
-            # 2. Compute Stats
             q_mean = jnp.mean(qs_stack, axis=0)
-            
-            # Stabilize Std Gradient
             q_var = jnp.var(qs_stack, axis=0)
             q_std = jnp.sqrt(q_var + 1e-6)
             
-            # 3. Apply Uncertainty Penalty (LCB)
             beta = self.config.get('uncertainty_beta', 2.0)
             robust_q = q_mean - beta * q_std
             
-            # Divide by scale to normalize
             return jnp.sum(robust_q) / (self.config['reward_scale'] + 1e-5)
 
         grad_q = jax.grad(reward_fn)(X_final_clean)
-        
-        # Explicitly sanitize gradients
         grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # [MAXIMIZATION LOGIC]
-        # We want to maximize Q.
-        # Adjoint equation: d(adj)/dt = ...
-        # Standard derivation for maximizing Reward R(x_1): a_1 = - grad_x R(x_1)
-        # This negative sign is correct for the backward ODE to guide the flow towards maxima.
-        adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
+        # [CRITICAL UPDATE FOR MAXIMIZATION]
+        # We define Adjoint = +Gradient (Direction of Ascent)
+        adjoint = jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
         
-        # Helper for logging
         avg_reward = reward_fn(X_final_clean) / observations.shape[0]
 
         def scan_backward(adjoint, args):
@@ -215,14 +198,24 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             v_base, vjp_fn = jax.vjp(drift_fn, a_curr)
             
+            # Dynamics: d(adj)/dt = -2(grad v)^T adj + adj/t
+            # We calculate this term:
             term1_grads = vjp_fn(adjoint)[0]
             term2_grads = - (1.0 / t_safe) * adjoint
+            
+            # vjp_total represents the NEGATIVE of the drift because we go backwards
             vjp_total = jnp.clip(2 * term1_grads + term2_grads, -self.config['vjp_clip'], self.config['vjp_clip'])
             
+            # Backward Step: a_prev = a_curr + ( - d(adj)/dt ) * dt
+            # Since vjp_total capture the dynamics, we add it.
             adjoint_next = adjoint + vjp_total * dt
             
             sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
-            target_v = v_base - (0.5 * sigma**2) * adjoint
+            
+            # [TARGET LOGIC FLIP]
+            # Target = Base + (Sigma^2 / 2) * Adjoint
+            # Since Adjoint = +Gradient, this ADDS the gradient to velocity.
+            target_v = v_base + (0.5 * sigma**2) * adjoint
             
             return adjoint_next, target_v
 
@@ -237,23 +230,20 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         rng = self.rng
         batch_size = batch['actions'].shape[0]
         
-        # --- 1. Setup & Constants ---
         n_steps = self.config.get('ode_steps', 20) 
         dt = 1.0 / n_steps
         
-        # Split RNGs
         rng, sample_rng, flow_rng, sub_rng = jax.random.split(rng, 4)
         
-        # --- 2. Forward SDE ---
+        # Forward
         traj, _ = self.forward_sde(flow_rng, batch['observations'], n_steps, dt)
         
-        # --- 3. Backward ODE ---
+        # Backward (Adjoint)
         adjoint_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
         
-        # --- 4. Efficient Subsampling ---
+        # Subsampling
         k_last = 10 
         m_random = 10 
-        
         last_indices = jnp.arange(n_steps - k_last, n_steps)
         rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
         active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
@@ -262,20 +252,20 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         active_adjoint = adjoint_traj[active_indices] 
         active_times = active_indices / n_steps       
         
-        # --- 5. Loss Computation ---
         def loss_fn(params):
             def step_loss(x_t, a_t, t_val):
                 t_batch = jnp.full((batch_size, 1), t_val)
                 
                 v_base = self.base_network.select('actor_bc_flow')(batch['observations'], x_t, t_batch)
-                
                 v_student = self.network.select('student_policy')(
                     batch['observations'], x_t, t_batch, params=params
                 )
                 
                 sigma_t = jnp.sqrt(2 * (1 - t_val + dt) / (t_val + dt))
                 
-                target = v_base - (0.5 * sigma_t**2) * a_t
+                # Regression Target: v_base + (sigma^2/2) * adjoint
+                # Note: We match the logic in compute_targets
+                target = v_base + (0.5 * sigma_t**2) * a_t
                 
                 weight = 4.0 / (sigma_t**2 + 1e-5)
                 sq_err = jnp.sum((v_student - target)**2, axis=-1)
