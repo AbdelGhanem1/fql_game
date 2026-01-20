@@ -215,7 +215,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             # [TARGET LOGIC FLIP]
             # Target = Base + (Sigma^2 / 2) * Adjoint
             # Since Adjoint = +Gradient, this ADDS the gradient to velocity.
-            target_v = v_base + (0.5 * sigma**2) * adjoint
+            target_v = v_base - (0.5 * sigma**2) * adjoint
             
             return adjoint_next, target_v
 
