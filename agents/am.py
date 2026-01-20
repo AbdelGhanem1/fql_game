@@ -247,7 +247,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         return targets[::-1], avg_reward
 
-    @functools.partial(jax.jit, static_argnames=('batch_size',))
+    @jax.jit
     def update(self, batch):
         rng = self.rng
         batch_size = batch['actions'].shape[0]
