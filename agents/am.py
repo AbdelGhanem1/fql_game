@@ -238,42 +238,43 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         # Forward
         traj, _ = self.forward_sde(flow_rng, batch['observations'], n_steps, dt)
         
-        # Backward (Adjoint)
-        adjoint_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
+        # Backward
+        # NOTE: 'target_traj' contains the pre-calculated v_base + correction
+        target_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
         
         # Subsampling
         k_last = 3 
-        m_random = 3 
+        m_random = 3
         last_indices = jnp.arange(n_steps - k_last, n_steps)
         rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
         active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
         
-        active_x_t = traj[active_indices]            
-        active_adjoint = adjoint_traj[active_indices] 
+        # Slice the data
+        active_x_t = traj[active_indices]             
+        active_targets = target_traj[active_indices]   # <--- This is v_target, not adjoint
         active_times = active_indices / n_steps       
         
         def loss_fn(params):
-            def step_loss(x_t, a_t, t_val):
+            def step_loss(x_t, v_target_t, t_val):
                 t_batch = jnp.full((batch_size, 1), t_val)
                 
-                v_base = self.base_network.select('actor_bc_flow')(batch['observations'], x_t, t_batch)
+                # 1. Student Prediction
                 v_student = self.network.select('student_policy')(
                     batch['observations'], x_t, t_batch, params=params
                 )
                 
+                # 2. Weighting
                 sigma_t = jnp.sqrt(2 * (1 - t_val + dt) / (t_val + dt))
-                
-                # Regression Target: v_base + (sigma^2/2) * adjoint
-                # Note: We match the logic in compute_targets
-                target = v_base + (0.5 * sigma_t**2) * a_t
-                
                 weight = 4.0 / (sigma_t**2 + 1e-5)
-                sq_err = jnp.sum((v_student - target)**2, axis=-1)
+                
+                # 3. Loss (MSE against the pre-computed target)
+                # We DO NOT re-calculate v_base or add adjoint here.
+                sq_err = jnp.sum((v_student - v_target_t)**2, axis=-1)
                 
                 weighted_err = weight * sq_err
                 return jnp.mean(jnp.clip(weighted_err, a_max=self.config['LCT']))
 
-            losses = jax.vmap(step_loss)(active_x_t, active_adjoint, active_times)
+            losses = jax.vmap(step_loss)(active_x_t, active_targets, active_times)
             return jnp.mean(losses)
 
         grad_fn = jax.value_and_grad(loss_fn)
