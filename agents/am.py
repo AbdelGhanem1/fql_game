@@ -161,12 +161,19 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             # Clip actions before IQL critic
             a_clipped = jnp.clip(a, -1.0, 1.0)
             
-            # 1. Get all ensemble Q-values
+            # 1. Get Q-values
             qs = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
             
+            # [FIXED LOGIC] Handle JAX Arrays that are ensembles (Shape: N, B, 1)
+            # If input is already stacked (e.g. from vmap), isinstance(list) is False.
             if isinstance(qs, (list, tuple)):
                 qs_stack = jnp.stack(qs, axis=0)
+            elif qs.ndim > 1 and qs.shape[0] < 30: 
+                # Heuristic: If first dim is small (e.g. 2, 5, 10), it's the ensemble dim.
+                # Batch dim is usually 256+.
+                qs_stack = qs
             else:
+                # Single critic case
                 qs_stack = qs[None, ...] 
 
             # 2. Compute Stats
@@ -180,7 +187,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             beta = self.config.get('uncertainty_beta', 2.0)
             robust_q = q_mean - beta * q_std
             
-            # [FIXED] DIVIDE by scale to normalize. (Main script sends q_scale ~ 50.0)
+            # Divide by scale to normalize
             return jnp.sum(robust_q) / (self.config['reward_scale'] + 1e-5)
 
         grad_q = jax.grad(reward_fn)(X_final_clean)
@@ -188,6 +195,11 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         # Explicitly sanitize gradients
         grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)
         
+        # [MAXIMIZATION LOGIC]
+        # We want to maximize Q.
+        # Adjoint equation: d(adj)/dt = ...
+        # Standard derivation for maximizing Reward R(x_1): a_1 = - grad_x R(x_1)
+        # This negative sign is correct for the backward ODE to guide the flow towards maxima.
         adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
         
         # Helper for logging
@@ -232,13 +244,10 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         # Split RNGs
         rng, sample_rng, flow_rng, sub_rng = jax.random.split(rng, 4)
         
-        # --- 2. Forward SDE (Generate Trajectories) ---
-        # [FIXED] Correct argument order: rng, observations, n_steps, dt
+        # --- 2. Forward SDE ---
         traj, _ = self.forward_sde(flow_rng, batch['observations'], n_steps, dt)
         
-        # --- 3. Backward ODE (Compute Adjoints) ---
-        # [FIXED] Correct argument order: traj, observations, n_steps, dt
-        # Note: reward_fn is calculated internally in compute_targets
+        # --- 3. Backward ODE ---
         adjoint_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
         
         # --- 4. Efficient Subsampling ---
@@ -249,9 +258,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
         active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
         
-        active_x_t = traj[active_indices]            # (n_active, B, D)
-        active_adjoint = adjoint_traj[active_indices] # (n_active, B, D)
-        active_times = active_indices / n_steps       # (n_active,)
+        active_x_t = traj[active_indices]            
+        active_adjoint = adjoint_traj[active_indices] 
+        active_times = active_indices / n_steps       
         
         # --- 5. Loss Computation ---
         def loss_fn(params):
