@@ -108,6 +108,58 @@ def log_reward_comparison(base_trajs, finetuned_trajs, wandb_key="comparison/rew
     wandb.log({wandb_key: wandb.Image(fig)})
     plt.close(fig)
 
+
+
+
+# --- [Paste in main_am.py: Helper Function] ---
+def compute_robust_q_stats(critic_agent, dataset, batch_size=4096):
+    """
+    Computes robust statistics (5th and 95th percentiles) of the Q-values 
+    over the entire dataset to determine the correct reward scale.
+    """
+    print("Computing Q-value statistics on dataset...")
+    q_values_all = []
+    
+    # Iterate over dataset in batches to avoid OOM
+    # Assuming dataset.size is available and dataset.sample can handle indices or we just sample randomly sufficient amount
+    # Better: explicit iteration if dataset supports it, otherwise large random sample
+    n_samples = min(dataset.size, 50000) # 50k samples is usually enough for robust stats
+    indices = np.random.permutation(dataset.size)[:n_samples]
+    
+    for i in range(0, n_samples, batch_size):
+        batch_idx = indices[i:i + batch_size]
+        batch = dataset.sample(len(batch_idx)) # Or dataset.get(batch_idx) if supported
+        
+        # Eval critic
+        # We use the target critic for stability, or the main critic. 
+        # IQL usually has 'target_critic' in the network.
+        qs = critic_agent.network.select('target_critic')(batch['observations'], batch['actions'])
+        
+        # Handle Ensemble: Take mean or min (IQL uses min usually, but for scaling mean is safer)
+        if isinstance(qs, (tuple, list)) or qs.ndim > 1:
+             # qs shape: (Ensemble, Batch)
+            q_metrics = jnp.mean(qs, axis=0) # Average across ensemble
+        else:
+            q_metrics = qs
+            
+        q_values_all.append(np.array(q_metrics))
+        
+    q_values_all = np.concatenate(q_values_all)
+    
+    # Robust Statistics
+    q_05 = np.percentile(q_values_all, 5)
+    q_95 = np.percentile(q_values_all, 95)
+    scale = q_95 - q_05
+    
+    # Fallback to avoid division by zero
+    if scale < 1e-4: 
+        scale = 1.0
+        
+    print(f"Dataset Q-Stats | 5th: {q_05:.4f} | 95th: {q_95:.4f} | Scale: {scale:.4f}")
+    return float(scale)
+
+
+
 def main(_):
     set_global_seed(FLAGS.seed)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
@@ -172,6 +224,15 @@ def main(_):
     FLAGS.config.am.am_steps = FLAGS.ode_steps
     FLAGS.config.am.uncertainty_beta = FLAGS.uncertainty_beta # [NEW]
 
+
+    # 1. Calculate Scale
+    q_scale = compute_robust_q_stats(critic_agent, dataset)
+
+    # 2. Update Config
+    # Assuming your config dictionary is mutable or you pass it to create
+    am_config['reward_scale'] = q_scale
+    am_config['LCT'] = 1.6 # Fixed LCT because we normalized the signal!
+
     am_agent = AdjointMatchingAgent.create(
         seed=FLAGS.seed,
         ex_observations=example_batch['observations'],
@@ -182,7 +243,7 @@ def main(_):
     )
 
     # --- 4. Setup Fixed Batch Monitor ---
-    monitor_batch = train_dataset.sample(32)
+    monitor_batch = train_dataset.sample(256)
     monitor_obs = monitor_batch['observations']
     base_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
     

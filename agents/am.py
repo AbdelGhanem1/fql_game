@@ -247,37 +247,112 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         return targets[::-1], avg_reward
 
-    @jax.jit
+    @functools.partial(jax.jit, static_argnames=('batch_size',))
     def update(self, batch):
-        rng, step_rng = jax.random.split(self.rng)
-        observations = batch['observations']
-        n_steps = self.config['am_steps']
-        dt = 1.0 / n_steps
-
-        traj = self.forward_sde(step_rng, observations, n_steps, dt)
-        targets, avg_rew = self.compute_targets(traj, observations, n_steps, dt)
+        rng = self.rng
+        batch_size = batch['actions'].shape[0]
         
-        def loss_fn(params):
-            def get_drift(i, x_t):
-                return self.get_ode_drift(params, 'student_policy', observations, x_t, i / n_steps)
+        # --- 1. Setup & Constants ---
+        n_steps = self.config['ode_steps'] # e.g., 40
+        dt = 1.0 / n_steps
+        scale = self.config['reward_scale']
+        
+        # Split RNGs
+        rng, sample_rng, flow_rng, sub_rng = jax.random.split(rng, 4)
+        
+        # --- 2. Forward SDE (Generate Trajectories) ---
+        # We must run this fully to get the trajectory
+        traj, noise = self.forward_sde(batch, n_steps, flow_rng)
+        # traj shape: (n_steps + 1, batch_size, action_dim)
+        
+        # --- 3. Define Reward Function with Robust Scaling ---
+        # We divide by scale here so gradients are normalized
+        def scaled_reward_fn(x):
+            # Calculate Raw Q-values (LCB or Mean)
+            qs = self.critic_agent.network.select('target_critic')(batch['observations'], x)
+            if isinstance(qs, (list, tuple)):
+                qs = jnp.stack(qs, axis=0) # (Ens, Batch)
             
-            preds = jax.vmap(get_drift)(jnp.arange(n_steps), traj[:-1])
+            # LCB for robustness (OOD protection)
+            q_mean = jnp.mean(qs, axis=0)
+            q_var = jnp.var(qs, axis=0)
+            beta = self.config.get('uncertainty_beta', 1.0)
+            raw_reward = q_mean - beta * jnp.sqrt(q_var)
             
-            steps = jnp.arange(n_steps)
-            t_float = steps / n_steps
-            sigma_sq = 2 * (1 - t_float + dt) / (t_float + dt)
-            weights = 4.0 / (sigma_sq + 1e-5)
-            weights = weights[:, None]
-            
-            sq_err = jnp.sum((preds - targets)**2, axis=-1)
-            weighted_sq_err = weights * sq_err
-            
-            loss = jnp.mean(jnp.clip(weighted_sq_err, a_max=self.config['LCT']))
-            return loss, {'loss': loss}
+            # NORMALIZATION: Robust Scaling
+            return jnp.sum(raw_reward) / scale
 
-        new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
-        info['avg_reward'] = avg_rew
-        return self.replace(network=new_network, rng=rng), info
+        # --- 4. Backward ODE (Compute Adjoints) ---
+        # We must run this fully to propagate adjoints from t=1 to t=0
+        adjoint_traj = self.compute_targets(traj, batch['observations'], dt, scaled_reward_fn)
+        # adjoint_traj shape: (n_steps + 1, batch_size, action_dim)
+        
+        # --- 5. Efficient Subsampling (Speed & Stability Optimization) ---
+        # Strategy: Train on last k steps (structure) + m random steps (exploration)
+        # This skips the noisy t=0 steps and reduces compute.
+        
+        k_last = 10 # Train heavily on refinement steps
+        m_random = 10 # Random samples from the rest
+        
+        # Indices for the end of trajectory (t near 1)
+        # We use steps 0 to n_steps-1 for v_student calls
+        last_indices = jnp.arange(n_steps - k_last, n_steps)
+        
+        # Random indices from the earlier part (excluding t=0 for stability)
+        rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
+        
+        # Combine and sort
+        active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
+        
+        # SLICE: Extract only the data we need for the loss
+        # We drop the last element of traj for input x_t (since we predict velocity at t)
+        active_x_t = traj[active_indices]           # (n_active, B, D)
+        active_adjoint = adjoint_traj[active_indices] # (n_active, B, D)
+        active_times = active_indices / n_steps       # (n_active,)
+        
+        # --- 6. Loss Computation (The "Loop") ---
+        def loss_fn(params):
+            # Helper to compute loss for a single timestep t
+            def step_loss(x_t, a_t, t_val):
+                # Expand time for batch
+                t_batch = jnp.full((batch_size, 1), t_val)
+                
+                # a. Base Model Drift (Frozen)
+                v_base = self.base_network.select('actor_bc_flow')(batch['observations'], x_t, t_batch)
+                
+                # b. Student Model Drift (Trainable)
+                v_student = self.network.select('student_policy')(
+                    batch['observations'], x_t, t_batch, params=params
+                )
+                
+                # c. Sigma with singularity offsets (Appendix H.1)
+                # Note: t_val is discrete index/n_steps. 
+                sigma_t = jnp.sqrt(2 * (1 - t_val + dt) / (t_val + dt))
+                
+                # d. Regression Target (Adjoint Matching)
+                # v_target = v_base - (sigma^2 / 2) * adjoint
+                target = v_base - (0.5 * sigma_t**2) * a_t
+                
+                # e. Weighting & Loss
+                # Weight = 4 / sigma^2
+                weight = 4.0 / (sigma_t**2 + 1e-5)
+                sq_err = jnp.sum((v_student - target)**2, axis=-1)
+                
+                # f. LCT (Loss Clipping)
+                # We expect LCT ~ 1.6 since we normalized rewards
+                weighted_err = weight * sq_err
+                return jnp.mean(jnp.clip(weighted_err, a_max=self.config['LCT']))
+
+            # Vectorize over the ACTIVE time steps only
+            losses = jax.vmap(step_loss)(active_x_t, active_adjoint, active_times)
+            return jnp.mean(losses)
+
+        # --- 7. Gradient Update ---
+        grad_fn = jax.value_and_grad(loss_fn)
+        loss_val, grads = grad_fn(self.network.params)
+        new_network = self.network.apply_gradients(grads=grads)
+        
+        return self.replace(network=new_network, rng=rng), {"loss": loss_val}
 
 def get_config():
     config = ml_collections.ConfigDict(dict(
