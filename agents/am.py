@@ -111,7 +111,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
         actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
-        steps = self.config.get('am_steps', 10) 
+        steps = self.config.get('ode_steps', 20) 
         dt = 1.0 / steps
         
         def body_fn(i, val):
@@ -253,7 +253,8 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         batch_size = batch['actions'].shape[0]
         
         # --- 1. Setup & Constants ---
-        n_steps = self.config['ode_steps'] # e.g., 40
+        n_steps = self.config.get('ode_steps', 20) 
+
         dt = 1.0 / n_steps
         scale = self.config['reward_scale']
         
@@ -357,16 +358,14 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(dict(
         agent_name='adjoint_matching',
-        lr=1e-5,
+        lr=3e-5,
         batch_size=256,
         actor_hidden_dims=(512, 512, 512, 512),
         actor_layer_norm=False,
-        am_steps=ml_collections.config_dict.placeholder(int),
+        ode_steps=ml_collections.config_dict.placeholder(int),     
+        uncertainty_beta=ml_collections.config_dict.placeholder(float), 
         reward_scale=ml_collections.config_dict.placeholder(float),
         LCT=ml_collections.config_dict.placeholder(float),
-        q_grad_clip=ml_collections.config_dict.placeholder(float),
-        vjp_clip=ml_collections.config_dict.placeholder(float),
         action_dim=ml_collections.config_dict.placeholder(int),
-        uncertainty_beta=ml_collections.config_dict.placeholder(float), # NEW
     ))
     return config

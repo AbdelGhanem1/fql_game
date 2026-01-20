@@ -224,9 +224,9 @@ def main(_):
     
     FLAGS.config.am.q_grad_clip = FLAGS.q_grad_clip
     FLAGS.config.am.vjp_clip = FLAGS.vjp_clip
-    FLAGS.config.am.am_steps = FLAGS.ode_steps
+    FLAGS.config.am.ode_steps = FLAGS.ode_steps
     FLAGS.config.am.uncertainty_beta = FLAGS.uncertainty_beta # [NEW]
-    
+
     FLAGS.config.am.reward_scale = q_scale
     FLAGS.config.am.LCT = 1.6 # Fixed LCT because we normalized the signal!
 
