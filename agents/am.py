@@ -62,34 +62,6 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
 
         network = TrainState.create(network_def, init_params, tx=network_tx)
 
-        # --- Verify Output ---
-        print("--- Verifying Output Similarity ---")
-        dummy_obs = ex_observations[:1]
-        dummy_act = ex_actions[:1]
-        dummy_t = jnp.zeros((1, 1))
-
-        if hasattr(base_agent.network, 'select'):
-             v_base = base_agent.network.select('actor_bc_flow')(dummy_obs, dummy_act, dummy_t)
-        else:
-             v_base = base_agent.network.apply(
-                {'params': base_agent.network.params},
-                dummy_obs, dummy_act, dummy_t,
-                method=lambda m: m.actor_bc_flow(dummy_obs, dummy_act, dummy_t) 
-            )
-
-        v_student = network.select('student_policy')(
-            dummy_obs, dummy_act, dummy_t, params=network.params
-        )
-
-        diff = jnp.mean((v_base - v_student) ** 2)
-        print(f"   MSE Diff: {float(diff):.6f}")
-        
-        if diff > 1e-5:
-            print("❌ CRITICAL FAIL: Student outputs do not match Base Agent!")
-        else:
-            print("✅ SUCCESS: Student is a perfect clone of Base Agent.")
-        print("=======================================\n")
-
         return cls(rng=rng, 
                    network=network, 
                    base_network=base_agent.network, 
@@ -111,6 +83,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
         actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
         
+        # [CRITICAL] Use ode_steps, NOT am_steps
         steps = self.config.get('ode_steps', 20) 
         dt = 1.0 / steps
         
@@ -174,7 +147,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         _, traj_stacked = jax.lax.scan(scan_step, (a_0, rng), jnp.arange(n_steps))
         last_a = _[0]
         traj_full = jnp.concatenate([traj_stacked, last_a[None, ...]], axis=0)
-        return traj_full
+        return traj_full, None # Returning None as noise placeholder
 
     @functools.partial(jax.jit, static_argnames=('n_steps',))
     def compute_targets(self, traj, observations, n_steps, dt):
@@ -199,9 +172,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             # 2. Compute Stats
             q_mean = jnp.mean(qs_stack, axis=0)
             
-            # [CRITICAL FIX] Stabilize Std Gradient
-            # If critics agree perfectly, variance is 0. 
-            # The gradient of sqrt(0) is infinite. We add 1e-6 to prevent this.
+            # Stabilize Std Gradient
             q_var = jnp.var(qs_stack, axis=0)
             q_std = jnp.sqrt(q_var + 1e-6)
             
@@ -209,16 +180,18 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             beta = self.config.get('uncertainty_beta', 2.0)
             robust_q = q_mean - beta * q_std
             
-            return jnp.sum(robust_q) * self.config['reward_scale']
+            # [FIXED] DIVIDE by scale to normalize. (Main script sends q_scale ~ 50.0)
+            return jnp.sum(robust_q) / (self.config['reward_scale'] + 1e-5)
 
         grad_q = jax.grad(reward_fn)(X_final_clean)
         
-        # [Additional Safety] Explicitly sanitize gradients to prevent NaNs propagating
+        # Explicitly sanitize gradients
         grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)
         
         adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
         
-        avg_reward = reward_fn(X_final_clean) / (self.config['reward_scale'] * observations.shape[0])
+        # Helper for logging
+        avg_reward = reward_fn(X_final_clean) / observations.shape[0]
 
         def scan_backward(adjoint, args):
             i, a_curr = args
@@ -254,106 +227,62 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         # --- 1. Setup & Constants ---
         n_steps = self.config.get('ode_steps', 20) 
-
         dt = 1.0 / n_steps
-        scale = self.config['reward_scale']
         
         # Split RNGs
         rng, sample_rng, flow_rng, sub_rng = jax.random.split(rng, 4)
         
         # --- 2. Forward SDE (Generate Trajectories) ---
-        # We must run this fully to get the trajectory
-        traj, noise = self.forward_sde(batch, n_steps, flow_rng)
-        # traj shape: (n_steps + 1, batch_size, action_dim)
+        # [FIXED] Correct argument order: rng, observations, n_steps, dt
+        traj, _ = self.forward_sde(flow_rng, batch['observations'], n_steps, dt)
         
-        # --- 3. Define Reward Function with Robust Scaling ---
-        # We divide by scale here so gradients are normalized
-        def scaled_reward_fn(x):
-            # Calculate Raw Q-values (LCB or Mean)
-            qs = self.critic_agent.network.select('target_critic')(batch['observations'], x)
-            if isinstance(qs, (list, tuple)):
-                qs = jnp.stack(qs, axis=0) # (Ens, Batch)
-            
-            # LCB for robustness (OOD protection)
-            q_mean = jnp.mean(qs, axis=0)
-            q_var = jnp.var(qs, axis=0)
-            beta = self.config.get('uncertainty_beta', 1.0)
-            raw_reward = q_mean - beta * jnp.sqrt(q_var)
-            
-            # NORMALIZATION: Robust Scaling
-            return jnp.sum(raw_reward) / scale
-
-        # --- 4. Backward ODE (Compute Adjoints) ---
-        # We must run this fully to propagate adjoints from t=1 to t=0
-        adjoint_traj = self.compute_targets(traj, batch['observations'], dt, scaled_reward_fn)
-        # adjoint_traj shape: (n_steps + 1, batch_size, action_dim)
+        # --- 3. Backward ODE (Compute Adjoints) ---
+        # [FIXED] Correct argument order: traj, observations, n_steps, dt
+        # Note: reward_fn is calculated internally in compute_targets
+        adjoint_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
         
-        # --- 5. Efficient Subsampling (Speed & Stability Optimization) ---
-        # Strategy: Train on last k steps (structure) + m random steps (exploration)
-        # This skips the noisy t=0 steps and reduces compute.
+        # --- 4. Efficient Subsampling ---
+        k_last = 10 
+        m_random = 10 
         
-        k_last = 10 # Train heavily on refinement steps
-        m_random = 10 # Random samples from the rest
-        
-        # Indices for the end of trajectory (t near 1)
-        # We use steps 0 to n_steps-1 for v_student calls
         last_indices = jnp.arange(n_steps - k_last, n_steps)
-        
-        # Random indices from the earlier part (excluding t=0 for stability)
         rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
-        
-        # Combine and sort
         active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
         
-        # SLICE: Extract only the data we need for the loss
-        # We drop the last element of traj for input x_t (since we predict velocity at t)
-        active_x_t = traj[active_indices]           # (n_active, B, D)
+        active_x_t = traj[active_indices]            # (n_active, B, D)
         active_adjoint = adjoint_traj[active_indices] # (n_active, B, D)
         active_times = active_indices / n_steps       # (n_active,)
         
-        # --- 6. Loss Computation (The "Loop") ---
+        # --- 5. Loss Computation ---
         def loss_fn(params):
-            # Helper to compute loss for a single timestep t
             def step_loss(x_t, a_t, t_val):
-                # Expand time for batch
                 t_batch = jnp.full((batch_size, 1), t_val)
                 
-                # a. Base Model Drift (Frozen)
                 v_base = self.base_network.select('actor_bc_flow')(batch['observations'], x_t, t_batch)
                 
-                # b. Student Model Drift (Trainable)
                 v_student = self.network.select('student_policy')(
                     batch['observations'], x_t, t_batch, params=params
                 )
                 
-                # c. Sigma with singularity offsets (Appendix H.1)
-                # Note: t_val is discrete index/n_steps. 
                 sigma_t = jnp.sqrt(2 * (1 - t_val + dt) / (t_val + dt))
                 
-                # d. Regression Target (Adjoint Matching)
-                # v_target = v_base - (sigma^2 / 2) * adjoint
                 target = v_base - (0.5 * sigma_t**2) * a_t
                 
-                # e. Weighting & Loss
-                # Weight = 4 / sigma^2
                 weight = 4.0 / (sigma_t**2 + 1e-5)
                 sq_err = jnp.sum((v_student - target)**2, axis=-1)
                 
-                # f. LCT (Loss Clipping)
-                # We expect LCT ~ 1.6 since we normalized rewards
                 weighted_err = weight * sq_err
                 return jnp.mean(jnp.clip(weighted_err, a_max=self.config['LCT']))
 
-            # Vectorize over the ACTIVE time steps only
             losses = jax.vmap(step_loss)(active_x_t, active_adjoint, active_times)
             return jnp.mean(losses)
 
-        # --- 7. Gradient Update ---
         grad_fn = jax.value_and_grad(loss_fn)
         loss_val, grads = grad_fn(self.network.params)
         new_network = self.network.apply_gradients(grads=grads)
         
-        return self.replace(network=new_network, rng=rng), {"loss": loss_val}
+        info = {"loss": loss_val, "avg_reward": avg_rew}
+        return self.replace(network=new_network, rng=rng), info
 
 def get_config():
     config = ml_collections.ConfigDict(dict(
@@ -362,7 +291,9 @@ def get_config():
         batch_size=256,
         actor_hidden_dims=(512, 512, 512, 512),
         actor_layer_norm=False,
-        ode_steps=ml_collections.config_dict.placeholder(int),     
+        
+        # Placeholders
+        ode_steps=ml_collections.config_dict.placeholder(int),      
         uncertainty_beta=ml_collections.config_dict.placeholder(float), 
         reward_scale=ml_collections.config_dict.placeholder(float),
         LCT=ml_collections.config_dict.placeholder(float),
