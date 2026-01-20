@@ -367,5 +367,7 @@ def get_config():
         reward_scale=ml_collections.config_dict.placeholder(float),
         LCT=ml_collections.config_dict.placeholder(float),
         action_dim=ml_collections.config_dict.placeholder(int),
+        q_grad_clip=ml_collections.config_dict.placeholder(float),
+        vjp_clip=ml_collections.config_dict.placeholder(float),
     ))
     return config
