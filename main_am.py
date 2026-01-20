@@ -278,12 +278,19 @@ def main(_):
             # Monitor Metrics
             current_actions = am_agent.sample_actions(monitor_obs, seed=jax.random.PRNGKey(0), temperature=0.0)
             qs_curr = critic_agent.network.select('target_critic')(monitor_obs, current_actions)
-            
-            if isinstance(qs_curr, (list, tuple)):
+
+            # [FIX] Check for array dimension instead of list type
+            if hasattr(qs_curr, 'ndim') and qs_curr.ndim > 1:
+                # Shape is likely (Ensemble_Size, Batch_Size)
+                mean_curr_q = jnp.mean(jnp.min(qs_curr, axis=0)) # Conservative estimate
+                std_curr_q = jnp.mean(jnp.std(qs_curr, axis=0))  # Average uncertainty
+            elif isinstance(qs_curr, (list, tuple)):
+                # Legacy support for list outputs
                 qs_curr_stack = jnp.stack(qs_curr, axis=0)
                 mean_curr_q = jnp.mean(jnp.min(qs_curr_stack, axis=0))
-                std_curr_q = jnp.mean(jnp.std(qs_curr_stack, axis=0)) # Average uncertainty
+                std_curr_q = jnp.mean(jnp.std(qs_curr_stack, axis=0))
             else:
+                # Single critic case
                 mean_curr_q = jnp.mean(qs_curr)
                 std_curr_q = 0.0
 
