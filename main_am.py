@@ -227,7 +227,7 @@ def main(_):
     FLAGS.config.am.ode_steps = FLAGS.ode_steps
     FLAGS.config.am.uncertainty_beta = FLAGS.uncertainty_beta # [NEW]
 
-    FLAGS.config.am.reward_scale = q_scale
+    FLAGS.config.am.reward_scale = q_scale * FLAGS.reward_scale
     FLAGS.config.am.LCT = FLAGS.LCT # Fixed LCT because we normalized the signal!
 
     am_agent = AdjointMatchingAgent.create(
