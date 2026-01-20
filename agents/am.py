@@ -179,6 +179,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             return jnp.sum(robust_q) / (self.config['reward_scale'] + 1e-5)
 
+        grad_q = jax.grad(reward_fn)(X_final_clean)
+        grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)    
+
         adjoint = -jnp.nan_to_num(grad_q) # Removing 'q_grad_clip' to match paper strictly
         
         avg_reward = reward_fn(X_final_clean) / observations.shape[0]
