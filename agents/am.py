@@ -184,7 +184,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         # [CRITICAL UPDATE FOR MAXIMIZATION]
         # We define Adjoint = +Gradient (Direction of Ascent)
-        adjoint = jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
+        adjoint = -jnp.clip(grad_q, -self.config['q_grad_clip'], self.config['q_grad_clip'])
         
         avg_reward = reward_fn(X_final_clean) / observations.shape[0]
 
