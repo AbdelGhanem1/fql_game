@@ -228,7 +228,7 @@ def main(_):
     FLAGS.config.am.uncertainty_beta = FLAGS.uncertainty_beta # [NEW]
 
     FLAGS.config.am.reward_scale = q_scale
-    FLAGS.config.am.LCT = 1.6 # Fixed LCT because we normalized the signal!
+    FLAGS.config.am.LCT = FLAGS.LCT # Fixed LCT because we normalized the signal!
 
     am_agent = AdjointMatchingAgent.create(
         seed=FLAGS.seed,
