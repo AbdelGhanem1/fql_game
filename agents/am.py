@@ -170,7 +170,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             else:
                 qs_stack = qs[None, ...] 
 
-            q_mean = jnp.mean(qs_stack, axis=0)
+            q_mean = jnp.min(qs_stack, axis=0)
             q_var = jnp.var(qs_stack, axis=0)
             q_std = jnp.sqrt(q_var + 1e-6)
             
