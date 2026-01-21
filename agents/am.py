@@ -131,13 +131,13 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         def scan_step(carrier, i):
             a_t, current_rng = carrier
             t_float = i / n_steps
-            t_safe = t_float + dt/10
+            t_safe = t_float + dt/10.0
             
             v_stud = self.get_ode_drift(self.network.params, 'student_policy', observations, a_t, t_float)
             
             # Memoryless Drift
             drift = 2 * v_stud - (a_t / t_safe)
-            sigma = jnp.sqrt(2 * (1 - t_float + dt/10) / (t_float + dt/10))
+            sigma = jnp.sqrt(2 * (1 - t_float + dt/10.0) / (t_float + dt/10.0))
             
             current_rng, step_rng = jax.random.split(current_rng)
             noise = jax.random.normal(step_rng, a_t.shape)
@@ -160,9 +160,9 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         def reward_fn(a):
             a_clipped = jnp.clip(a, -1.0, 1.0)
-            qs = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped)
+            qs = self.critic_agent.network.select('target_critic')(observations, actions=a_clipped) 
             
-            # [FIXED] Handle Ensemble Shapes Correctly
+            # --- Handle Ensemble Shapes ---
             if isinstance(qs, (list, tuple)):
                 qs_stack = jnp.stack(qs, axis=0)
             elif qs.ndim > 1 and qs.shape[0] < 30: 
@@ -177,83 +177,74 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             beta = self.config.get('uncertainty_beta', 2.0)
             robust_q = q_mean - beta * q_std
             
-            return jnp.sum(robust_q) / (self.config['reward_scale'] + 1e-5)
+            # --- [NEW] Q-Value Normalization ---
+            # 1. Calculate the mean absolute value across the batch
+            abs_mean = jnp.mean(jnp.abs(robust_q))
+            
+            # 2. Stop gradient to treat it as a constant scaler
+            #    Add epsilon to prevent division by zero
+            normalizer = jax.lax.stop_gradient(abs_mean + 1e-6)
+            
+            # 3. Normalize robust_q
+            #    This makes the gradient magnitude invariant to the scale of Q-values
+            normalized_q = robust_q / normalizer
 
+            # Note: We usually remove 'reward_scale' when using normalization, 
+            # or you can keep it as a 'temperature' hyperparameter (e.g., set to 1.0).
+            return jnp.sum(normalized_q)*self.config['reward_scale']
+
+        # Calculate gradients using the normalized reward
         grad_q = jax.grad(reward_fn)(X_final_clean)
         grad_q = jnp.nan_to_num(grad_q, nan=0.0, posinf=0.0, neginf=0.0)    
 
-        adjoint = -jnp.nan_to_num(grad_q) # Removing 'q_grad_clip' to match paper strictly
+        adjoint = -jnp.nan_to_num(grad_q) 
         
-        avg_reward = reward_fn(X_final_clean) / observations.shape[0]
+        # Calculate avg_reward for logging (using the un-normalized value is usually better for readability)
+        # Re-running logic briefly or just caching the robust_q if needed, 
+        # but here we can just call the function again for the scalar metric.
+        # However, calling reward_fn returns the SUM of normalized values.
+        # For logging, we likely want the raw value magnitude.
+        
+        # Helper to get raw value for logging
+        def get_raw_reward_scalar(a):
+            # ... (Repeat extraction logic just for logging, or allow overhead) ...
+            # For efficiency, we trust the normalized grad is what matters for 'adjoint'.
+            # We can log the normalized score:
+            return reward_fn(a) / observations.shape[0]
+
+        avg_reward = get_raw_reward_scalar(X_final_clean)
 
         def scan_backward(adjoint, args):
-            i, x_curr = args # x_curr is now correctly aligned (starts at X_N)
-            t_float = (i + 1) / n_steps # Time corresponds to x_curr (t+h)
-            
-            # Note: t_safe logic in code used t_float + dt. 
-            # If t_float is now (i+1)/N, it represents the time of 'adjoint'.
-            # The dynamics are calculated at t_float.
+            i, x_curr = args 
+            t_float = (i + 1) / n_steps 
             
             def drift_fn(a):
                 return self.get_base_drift(observations, a, t_float)
             
-            # Calculate dynamics at (adjoint, x_curr, t_float)
             v_base, vjp_fn = jax.vjp(drift_fn, x_curr)
             
             term1_grads = vjp_fn(adjoint)[0]
             term2_grads = - (1.0 / t_float) * adjoint
             
-            # Eq 216: d(adj)/dt = -(2(grad v)^T adj - adj/t)
-            # vjp_total represents NEGATIVE drift (for backward step)
-            # Removing 'vjp_clip' to match paper strictly
             vjp_total = 2 * term1_grads + term2_grads
             
-            # Step from t+h to t
             adjoint_next = adjoint + vjp_total * dt
             
-            # --- Target Calculation ---
-            # Use adjoint_next (approx a_t) and time t = i/n_steps
-            t_target = i / n_steps
-            sigma = jnp.sqrt(2 * (1 - t_target + dt/10) / (t_target + dt/10))
-            
-            # Re-fetch v_base at time t (since x_curr was at t+h)
-            # This requires X at time t. 
-            # Ideally, scan should carry (X_{t+h}, X_t).
-            # APPROXIMATION FIX:
-            # Since we calculate target for the loss at time t, 
-            # we need v_base(X_t) and adjoint(X_t).
-            # The scan output 'targets' matches indices 0..N-1.
-            # We cannot easily re-calculate v_base(X_t) here without passing X_t in args.
-            
-            # BETTER APPROACH:
-            # We return adjoint_next. We compute the final target in the loss loop 
-            # or map it post-scan. 
-            # HOWEVER, to keep structure:
-            # We will return the raw adjoint_next and compute the full target later,
-            # OR assume v_base doesn't change drastically between t and t+h (Euler approx).
-            # To be STRICT: The target_v must be calculated outside or pass X_t in.
-            
-            return adjoint_next, adjoint_next # Return adjoint for external computation
+            return adjoint_next, adjoint_next 
 
-        # 1. FIX INDEXING: Input starts at X_N (traj[-1]) down to X_1
-        indices = jnp.arange(n_steps)[::-1] # N-1 ... 0
-        traj_inputs = traj[1:][::-1]        # X_N ... X_1
+        indices = jnp.arange(n_steps)[::-1] 
+        traj_inputs = traj[1:][::-1]        
         
         _, adjoint_seq = jax.lax.scan(scan_backward, adjoint, (indices, traj_inputs))
         
-        # adjoint_seq is ordered N-1 ... 0. Reverse to 0 ... N-1
         adjoint_seq = adjoint_seq[::-1]
         
-        # Now compute Targets using correct alignment:
-        # X_t (traj[:-1]), Time t, and Adjoint_t (adjoint_seq)
         x_t_seq = traj[:-1]
         times = jnp.linspace(0, 1.0 - dt, n_steps)
         
-        # Vectorized target computation to ensure exact t matching
         def compute_v_target(x, adj, t):
-            sigma = jnp.sqrt(2 * (1 - t + dt/10) / (t + dt/10))
+            sigma = jnp.sqrt(2 * (1 - t + dt/10.0) / (t + dt/10.0))
             v_b = self.get_base_drift(observations, x, t)
-            # Use the CORRECTED SIGN from previous turn:
             return v_b - (0.5 * sigma**2) * adj
             
         final_targets = jax.vmap(compute_v_target)(x_t_seq, adjoint_seq, times)
@@ -299,7 +290,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                 )
                 
                 # 2. Weighting
-                sigma_t = jnp.sqrt(2 * (1 - t_val + dt/10) / (t_val + dt/10))
+                sigma_t = jnp.sqrt(2 * (1 - t_val + dt/10.0) / (t_val + dt/10.0))
                 weight = 4.0 / (sigma_t**2 + 1e-5)
                 
                 # 3. Loss (MSE against the pre-computed target)

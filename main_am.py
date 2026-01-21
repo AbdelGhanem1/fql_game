@@ -216,7 +216,7 @@ def main(_):
             pickle.dump(flax.serialization.to_state_dict(critic_agent), f)
 
 
-    q_scale = compute_robust_q_stats(critic_agent, train_dataset)
+    q_scale = 1.0 #compute_robust_q_stats(critic_agent, train_dataset)
 
     # --- 3. Initialize Adjoint Matching ---
     FLAGS.config.am.action_dim = example_batch['actions'].shape[-1]
