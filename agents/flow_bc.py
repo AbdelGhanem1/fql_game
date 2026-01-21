@@ -79,7 +79,7 @@ class FlowBCAgent(flax.struct.PyTreeNode):
             seed = jax.random.PRNGKey(0)
             
         # 1. Sample Noise x_0 scaled by temperature
-        actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
+        actions = jax.random.normal(seed, (batch_size, action_dim)) #* temperature
         
         # 2. Encode Observations (if encoder exists)
         if self.config['encoder'] is not None:
@@ -89,7 +89,7 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         # 3. Euler Integration
         dt = 1.0 / self.config['flow_steps']
 
-        
+
         def body_fn(i, val):
             curr_actions = val
             t = jnp.full((batch_size, 1), i * dt)

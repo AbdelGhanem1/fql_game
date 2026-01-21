@@ -81,7 +81,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         if seed is None:
             seed = jax.random.PRNGKey(0)
             
-        actions = jax.random.normal(seed, (batch_size, action_dim)) * temperature
+        actions = jax.random.normal(seed, (batch_size, action_dim)) #* temperature
         
         # Use ode_steps
         steps = self.config.get('ode_steps', 20) 
@@ -131,13 +131,13 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         def scan_step(carrier, i):
             a_t, current_rng = carrier
             t_float = i / n_steps
-            t_safe = t_float + dt
+            t_safe = t_float + dt/10
             
             v_stud = self.get_ode_drift(self.network.params, 'student_policy', observations, a_t, t_float)
             
             # Memoryless Drift
             drift = 2 * v_stud - (a_t / t_safe)
-            sigma = jnp.sqrt(2 * (1 - t_float + dt/4) / (t_float + dt/4))
+            sigma = jnp.sqrt(2 * (1 - t_float + dt/10) / (t_float + dt/10))
             
             current_rng, step_rng = jax.random.split(current_rng)
             noise = jax.random.normal(step_rng, a_t.shape)
@@ -214,7 +214,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             # --- Target Calculation ---
             # Use adjoint_next (approx a_t) and time t = i/n_steps
             t_target = i / n_steps
-            sigma = jnp.sqrt(2 * (1 - t_target + dt/4) / (t_target + dt/4))
+            sigma = jnp.sqrt(2 * (1 - t_target + dt/10) / (t_target + dt/10))
             
             # Re-fetch v_base at time t (since x_curr was at t+h)
             # This requires X at time t. 
@@ -251,7 +251,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         # Vectorized target computation to ensure exact t matching
         def compute_v_target(x, adj, t):
-            sigma = jnp.sqrt(2 * (1 - t + dt/4) / (t + dt/4))
+            sigma = jnp.sqrt(2 * (1 - t + dt/10) / (t + dt/10))
             v_b = self.get_base_drift(observations, x, t)
             # Use the CORRECTED SIGN from previous turn:
             return v_b - (0.5 * sigma**2) * adj
@@ -278,11 +278,11 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         target_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
         
         # Subsampling
-        k_last = 9
-        m_random = 9
-        last_indices = jnp.arange(n_steps - k_last, n_steps)
-        rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
-        active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
+        #k_last = 9
+        #m_random = 9
+        last_indices = jnp.arange(0, n_steps)
+        #rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
+        active_indices = jnp.sort(last_indices) #jnp.sort(jnp.concatenate([last_indices, rand_indices]))
         
         # Slice the data
         active_x_t = traj[active_indices]             
@@ -299,7 +299,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                 )
                 
                 # 2. Weighting
-                sigma_t = jnp.sqrt(2 * (1 - t_val + dt/4) / (t_val + dt/4))
+                sigma_t = jnp.sqrt(2 * (1 - t_val + dt/10) / (t_val + dt/10))
                 weight = 4.0 / (sigma_t**2 + 1e-5)
                 
                 # 3. Loss (MSE against the pre-computed target)
