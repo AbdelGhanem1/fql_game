@@ -137,7 +137,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             
             # Memoryless Drift
             drift = 2 * v_stud - (a_t / t_safe)
-            sigma = jnp.sqrt(2 * (1 - t_float + dt) / (t_float + dt))
+            sigma = jnp.sqrt(2 * (1 - t_float + dt/4) / (t_float + dt/4))
             
             current_rng, step_rng = jax.random.split(current_rng)
             noise = jax.random.normal(step_rng, a_t.shape)
@@ -214,7 +214,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
             # --- Target Calculation ---
             # Use adjoint_next (approx a_t) and time t = i/n_steps
             t_target = i / n_steps
-            sigma = jnp.sqrt(2 * (1 - t_target + dt) / (t_target + dt))
+            sigma = jnp.sqrt(2 * (1 - t_target + dt/4) / (t_target + dt/4))
             
             # Re-fetch v_base at time t (since x_curr was at t+h)
             # This requires X at time t. 
@@ -251,7 +251,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         
         # Vectorized target computation to ensure exact t matching
         def compute_v_target(x, adj, t):
-            sigma = jnp.sqrt(2 * (1 - t + dt) / (t + dt))
+            sigma = jnp.sqrt(2 * (1 - t + dt/4) / (t + dt/4))
             v_b = self.get_base_drift(observations, x, t)
             # Use the CORRECTED SIGN from previous turn:
             return v_b - (0.5 * sigma**2) * adj
@@ -299,7 +299,7 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
                 )
                 
                 # 2. Weighting
-                sigma_t = jnp.sqrt(2 * (1 - t_val + dt) / (t_val + dt))
+                sigma_t = jnp.sqrt(2 * (1 - t_val + dt/4) / (t_val + dt/4))
                 weight = 4.0 / (sigma_t**2 + 1e-5)
                 
                 # 3. Loss (MSE against the pre-computed target)

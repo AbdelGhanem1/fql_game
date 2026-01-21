@@ -89,7 +89,6 @@ class FlowBCAgent(flax.struct.PyTreeNode):
         # 3. Euler Integration
         dt = 1.0 / self.config['flow_steps']
 
-        print('number of flow steps used inside bc: ', self.config['flow_steps'])
         
         def body_fn(i, val):
             curr_actions = val
