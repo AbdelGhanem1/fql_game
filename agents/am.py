@@ -278,8 +278,8 @@ class AdjointMatchingAgent(flax.struct.PyTreeNode):
         target_traj, avg_rew = self.compute_targets(traj, batch['observations'], n_steps, dt)
         
         # Subsampling
-        k_last = 3
-        m_random = 3
+        k_last = 9
+        m_random = 9
         last_indices = jnp.arange(n_steps - k_last, n_steps)
         rand_indices = jax.random.randint(sub_rng, (m_random,), 1, n_steps - k_last)
         active_indices = jnp.sort(jnp.concatenate([last_indices, rand_indices]))
