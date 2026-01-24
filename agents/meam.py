@@ -111,7 +111,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             # 2. Estimate Score at t ~ 1.0 using Tweedie.
             # We evaluate at t=0.995 to approximate terminal score without numerical blowup.
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.995
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
             
             # Score points towards high density. 
             # MaxEnt requires pushing AWAY from density (Direction = -Score).
