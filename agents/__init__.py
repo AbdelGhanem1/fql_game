@@ -10,6 +10,7 @@ from agents.fedit import FEditAgent
 from agents.fawac import FAWACAgent
 from agents.rebrac import ReBRACAgent
 from agents.ifql import IFQLAgent
+from agents.meam import MEAMAgent
 
 agents = dict(
     ifql=IFQLAgent,
@@ -24,4 +25,5 @@ agents = dict(
     fawac=FAWACAgent,
     rebrac=ReBRACAgent,
     dcgql=DCGQLAgent,
+    meam=MEAMAgent,
 )
