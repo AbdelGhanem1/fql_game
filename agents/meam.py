@@ -483,7 +483,7 @@ def get_config():
             fql_alpha=0.,   # If > 0 train a one-step policy that is distilled from the QAM flow policy while maximizing Q
             edit_scale=0.,  # If > 0 train an edit policy that refines the output of the QAM flow policy to maximize Q,
 
-            me_am_alpha=0.1,
+            me_am_alpha=1.0,
             
             ## Other variants/hyperparamter(s)
             target_actor=True,
