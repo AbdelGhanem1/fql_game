@@ -137,7 +137,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             target_actor = self.network.select("target_actor_slow")
             
             # Evaluate near t=1.0 (e.g., 0.99)
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
             
             # Use the "Soft-Saturated" Tweedie from our previous discussion
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
