@@ -50,20 +50,21 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
     @staticmethod
     def compute_score_ot(actor_fn, obs, x, t):
+        """
+        SiD-style Score Approximation.
+        Instead of reconstructing the singular noise x_0/(1-t),
+        we use the predicted velocity to guide exploration.
+        
+        Logic: The flow v points towards the data (high density).
+        So v is roughly proportional to \nabla log p.
+        We want to maximize entropy -> move against v.
+        """
         v = actor_fn(obs, x, t)
         
-        # 1. Recover the implicit noise (x_0)
-        x_0_est = x - t * v
-        
-        # --- THE FIX: Soft Saturation ---
-        # This prevents the linear spring explosion (F ~ x)
-        # It makes the force behave like "Wind" (constant) when x is far away.
-        # 5.0 is a reasonable bounds for Gaussian noise (5 sigma).
-        x_0_est = 5.0 * jnp.tanh(x_0_est / 5.0)
-
-        # 2. Scale by 1/(1-t)
-        t_safe = jnp.clip(1.0 - t, a_min=1e-3)
-        score = -x_0_est / t_safe
+        # Scaling: v has magnitude ~ ||x1 - x0|| (approx 2.0).
+        # We don't divide by (1-t), so this never explodes.
+        # This is a 'proxy' score that is stable and effective.
+        score = v 
         
         return score
 
