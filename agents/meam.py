@@ -50,20 +50,32 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
     @staticmethod
     def compute_score_ot(actor_fn, obs, x, t):
+        # 1. Get velocity and estimate initial noise x0
         v = actor_fn(obs, x, t)
-
-        # 1. Exact Numerator
         x_0_est = x - t * v
 
-        # 2. Soft Saturation (The Safety Mechanism)
-        # Prevents explosion for outliers. 
-        # 5.0 is a generous bound (5 sigma).
-        #scale = 5.0
-        #x_0_bounded = scale * jnp.tanh(x_0_est / scale)
+        # 2. Gaussian Shell Projection (The Mathematical Fix)
+        # We know true x0 comes from N(0, I), so ||x0|| should be approx sqrt(dim).
+        # If the estimator implies an x0 way outside this shell, it is hallucinating.
+        dim = x.shape[-1]
+        target_norm = jnp.sqrt(dim)
+        
+        # Calculate the norm of the estimator
+        current_norm = jnp.linalg.norm(x_0_est, axis=-1, keepdims=True)
+        
+        # Soft-Project: If norm > target, scale it down. If norm < target, keep it (allow localized noise).
+        # This preserves the DIRECTION of the gradient but fixes the MAGNITUDE.
+        scale_factor = jnp.minimum(1.0, (target_norm * 1.5) / (current_norm + 1e-6))
+        x_0_clamped = x_0_est * scale_factor
 
-        # 3. Exact Denominator
-        t_safe = jnp.clip(1.0 - t, a_min=1e-3)
-        score = -x_0_est / t_safe
+        # 3. Denominator Stability
+        # We still need protection against t=1.0, but now the numerator is bounded.
+        # Using a smooth max is mathematically cleaner than clip.
+        t_safe = jnp.maximum(1.0 - t, 1e-3)
+        
+        # 4. Compute Score
+        # Score = - (estimated noise) / (variance of noise in current step)
+        score = -x_0_clamped / t_safe
 
         return score
 
@@ -117,7 +129,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         #alpha_schedule = jnp.clip(current_step / warmup_steps, 0.0, 1.0)
         
         # Instead of Python 'if', use JAX's 'where'
-        effective_alpha = jnp.where(current_step > 25000.0, self.config["me_am_alpha"], 0.0)
+        effective_alpha = jnp.where(current_step > 1.0, self.config["me_am_alpha"], 0.0)
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
