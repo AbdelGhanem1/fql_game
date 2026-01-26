@@ -59,9 +59,9 @@ class MEAMAgent(flax.struct.PyTreeNode):
         x_0_est = x - t * v
         
         # DEBUG: Print these values once to confirm the explosion source
-        jax.debug.print("x norm: {x}", x=jnp.linalg.norm(x))
-        jax.debug.print("v norm: {v}", v=jnp.linalg.norm(v))
-        jax.debug.print("x0 est: {x0}", x0=jnp.linalg.norm(x_0_est))
+        # jax.debug.print("x norm: {x}", x=jnp.linalg.norm(x))
+        # jax.debug.print("v norm: {v}", v=jnp.linalg.norm(v))
+        # jax.debug.print("x0 est: {x0}", x0=jnp.linalg.norm(x_0_est))
 
         # Stability Fix 2: Clip the noise estimate. 
         # Theoretically x_0 is N(0,1). Values > 20 are impossible/numerical errors.
