@@ -52,17 +52,19 @@ class MEAMAgent(flax.struct.PyTreeNode):
     def compute_score_ot(actor_fn, obs, x, t):
         """
         Estimates the score via Tweedie's formula adapted for OT Flow.
-        Geometry: x_t = (1-t)x_0 + t x_1  =>  v = x_1 - x_0
-        The implicit score points towards the denoised sample x_1.
-        Direction: x_1 - x_t = (1-t)v
-        Scaling: Proportional to inverse variance ~ 1/(1-t)
-        Result: score approx v / (1-t)
+        Relationship: x_0 = x_t - t * v_t
+        Score(x_t) ~ -x_0 / (1-t)  (Derived from Gaussian noise assumption)
+                   ~ -(x_t - t*v_t) / (1-t) ?? 
+                   Actually, simplest approximation for OT:
+                   Score ~ (v_t - x_t) / (1-t)
         """
         v = actor_fn(obs, x, t)
         # We clip (1-t) to avoid division by zero stability issues near t=1
         t_safe = jnp.clip(1.0 - t, a_min=1e-4) 
-        score = v / t_safe
-        return score    
+        
+        # FIX: Subtract x from v to get the correct noise-cancellation direction
+        score = (v - x) / t_safe
+        return score
 
 
     @partial(jax.jit, static_argnames=("flow_steps"))
@@ -104,22 +106,18 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # q_grad = Gradient of Q w.r.t action (Direction of high Reward)
         q_grad = grad_fn(obs, xs[-1]) 
         
-        # --- ME-AM Modification Start ---
         if self.config["me_am_alpha"] > 0.:
-            # 1. Use Target Actor as the Reference Policy (Mirror Descent Lag)
             target_actor = self.network.select("target_actor_slow")
             
-            # 2. Estimate Score at t ~ 1.0 using Tweedie.
-            # We evaluate at t=0.995 to approximate terminal score without numerical blowup.
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
+            # Recommendation: Increase t_eval to 0.99 for sharper manifold definition
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99 
             
-            # Score points towards high density. 
-            # MaxEnt requires pushing AWAY from density (Direction = -Score).
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             
-            # 3. Combine Gradients: Maximize (Q + alpha * Entropy)
-            # Gradient = Grad_Q + alpha * Grad_Entropy
-            # Gradient = Grad_Q + alpha * (-Score)
+            # This gradient logic remains CORRECT:
+            # We want to ASCENT on H, so we move in direction of Gradient(H).
+            # Gradient(H) = -Score.
+            # Total Gradient = Grad_Q + alpha * Grad_H = Grad_Q - alpha * Score.
             total_grad = q_grad - self.config["me_am_alpha"] * score_est
         else:
             total_grad = q_grad
