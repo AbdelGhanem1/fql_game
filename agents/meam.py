@@ -155,7 +155,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             # If score is > 10x stronger than Q-grad, scale it down.
             # This prevents the 1e8 explosion while keeping the direction.
-            damping_factor = jnp.minimum(1.0, 10.0 / ratio)
+            damping_factor = jnp.minimum(1.0, 5.0 / ratio)
             
             # Apply alpha and damping
             # We effectively cap the entropy force.
