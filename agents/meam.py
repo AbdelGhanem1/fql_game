@@ -113,7 +113,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         
         # Define Warmup: 0 to 20,000 steps
         # This prevents the entropy force from exploding before the Q-function is learned.
-        warmup_steps = 20000.0
+        warmup_steps = 100000.0
         alpha_schedule = jnp.clip(current_step / warmup_steps, 0.0, 1.0)
         
         # Calculate the effective alpha
