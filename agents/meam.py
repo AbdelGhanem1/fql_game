@@ -58,12 +58,12 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # 2. Soft Saturation (The Safety Mechanism)
         # Prevents explosion for outliers. 
         # 5.0 is a generous bound (5 sigma).
-        scale = 5.0
-        x_0_bounded = scale * jnp.tanh(x_0_est / scale)
+        #scale = 5.0
+        #x_0_bounded = scale * jnp.tanh(x_0_est / scale)
 
         # 3. Exact Denominator
         t_safe = jnp.clip(1.0 - t, a_min=1e-3)
-        score = -x_0_bounded / t_safe
+        score = -x_0_est / t_safe
 
         return score
 
