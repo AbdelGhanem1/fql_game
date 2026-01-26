@@ -52,54 +52,72 @@ class MEAMAgent(flax.struct.PyTreeNode):
     def compute_score_ot(actor_fn, obs, x, t):
         v = actor_fn(obs, x, t)
         
-        # Stability Fix 1: Ensure shapes are broadcastable
-        # t might be (Batch, 1), x is (Batch, Dim). JAX handles this, but be explicit.
-        
-        # 1. Recover the implicit noise (x_0)
+        # 1. Recover noise
         x_0_est = x - t * v
         
-        # DEBUG: Print these values once to confirm the explosion source
-        # jax.debug.print("x norm: {x}", x=jnp.linalg.norm(x))
-        # jax.debug.print("v norm: {v}", v=jnp.linalg.norm(v))
-        # jax.debug.print("x0 est: {x0}", x0=jnp.linalg.norm(x_0_est))
-
-        # Stability Fix 2: Clip the noise estimate. 
-        # Theoretically x_0 is N(0,1). Values > 20 are impossible/numerical errors.
-        # This prevents the 1e22 explosion if x has drifted.
-        #x_0_est = jnp.clip(x_0_est, -20.0, 20.0)
-
-        # 2. Scale by 1/(1-t)
-        t_safe = jnp.clip(1.0 - t, a_min=1e-4) # Relaxed clip for safety
-        
+        # 2. Linear Scaling with Safety
+        t_safe = jnp.clip(1.0 - t, a_min=1e-3)
         score = -x_0_est / t_safe
+        
+        # 3. SAFETY: Clip the score to prevent the feedback loop
+        # This keeps the gradient magnitude comparable to QAM's reward gradient
+        score = jnp.clip(score, -100.0, 100.0)
+        
         return score
 
 
     @partial(jax.jit, static_argnames=("flow_steps"))
     def adj_matching(self, obs, rng, flow_steps=None):
+        # Standard flow setup
         flow_steps = self.config["flow_steps"] if flow_steps is None else flow_steps
+        
+        # Determine action dimension
+        if self.config["action_chunking"]:
+            action_dim = self.config['action_dim'] * self.config['horizon_length']
+        else:
+            action_dim = self.config['action_dim']
 
-        action_dim = self.config['action_dim'] * \
-                        (self.config['horizon_length'] if self.config["action_chunking"] else 1)
+        # Initial Noise
         x = jax.random.normal(rng, shape=obs.shape[:-1] + (action_dim,))
 
+        # Select target actor
         actor_slow = self.network.select("target_actor_slow" if self.config["target_actor"] else "actor_slow")
 
         h = 1 / flow_steps
         xs = [x]
         ts = []
+        
+        # --- ROBUST SDE LOOP ---
         for i, key in zip(range(flow_steps), jax.random.split(rng, flow_steps)):
-            t = i / flow_steps * jnp.ones_like(x[..., 0:1])
-            sigma = jnp.sqrt(2 * (1 - t + h) / (t + h))
+            # Explicit time calculation
+            t = i * h * jnp.ones_like(x[..., 0:1])
+            
+            # Calculate Sigma (Bridge Diffusion Coefficient)
+            # We use max(..., 0.0) to prevent NaN at the very last step if float precision wavers
+            sigma = jnp.sqrt(2 * jnp.maximum(1 - (t + h), 0.0) / (t + h))
+            
             noise = jax.random.normal(key, x.shape)
+            
+            # Get velocity from current policy
+            if self.config["residual"]:
+                v_curr = self.network.select("actor_fast")(obs, x, t) + actor_slow(obs, x, t)
+            else:
+                v_curr = self.network.select("actor_fast")(obs, x, t)
+
             if i != flow_steps - 1:
-                if self.config["residual"]:
-                    v = self.network.select("actor_fast")(obs, x, t) + actor_slow(obs, x, t)
-                else:
-                    v = self.network.select("actor_fast")(obs, x, t)
-                x = x + h * (2 * v - x / (t + h)) + jnp.sqrt(h) * sigma * noise
-            else:  # use ODE integration for the last step following the adjoint-matching paper
+                # SDE Step: x + h*(2v - x/(t+h))
+                # Note: (t+h) in denominator is correct for the bridge SDE starting at 0
+                drift = 2 * v_curr - x / (t + h)
+                x = x + h * drift + jnp.sqrt(h) * sigma * noise
+            else:
+                # Last step: Use ODE / Target Actor to land on manifold
+                # This matches your original logic
                 x = x + h * actor_slow(obs, x, t)
+
+            # --- SAFETY CLIP ---
+            # This is the line that saves you from 1e11 gradients.
+            # If the actor outputs garbage, this stops the values from reaching infinity.
+            x = jnp.clip(x, -50.0, 50.0)
 
             xs.append(x)
             ts.append(t)
