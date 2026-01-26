@@ -50,22 +50,21 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
     @staticmethod
     def compute_score_ot(actor_fn, obs, x, t):
-        """
-        SiD-style Score Approximation.
-        Instead of reconstructing the singular noise x_0/(1-t),
-        we use the predicted velocity to guide exploration.
-        
-        Logic: The flow v points towards the data (high density).
-        So v is roughly proportional to \nabla log p.
-        We want to maximize entropy -> move against v.
-        """
         v = actor_fn(obs, x, t)
-        
-        # Scaling: v has magnitude ~ ||x1 - x0|| (approx 2.0).
-        # We don't divide by (1-t), so this never explodes.
-        # This is a 'proxy' score that is stable and effective.
-        score = v/(1-t)
-        
+
+        # 1. Exact Numerator
+        x_0_est = x - t * v
+
+        # 2. Soft Saturation (The Safety Mechanism)
+        # Prevents explosion for outliers. 
+        # 5.0 is a generous bound (5 sigma).
+        scale = 5.0
+        x_0_bounded = scale * jnp.tanh(x_0_est / scale)
+
+        # 3. Exact Denominator
+        t_safe = jnp.clip(1.0 - t, a_min=1e-3)
+        score = -x_0_bounded / t_safe
+
         return score
 
 
@@ -108,25 +107,33 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # q_grad = Gradient of Q w.r.t action (Direction of high Reward)
         q_grad = grad_fn(obs, xs[-1]) 
         
+        # === [STEP 2] Insert Alpha Scheduling Here ===
+        # We access the current step from the network state
+        current_step = self.network.step 
+        
+        # Define Warmup: 0 to 20,000 steps
+        # This prevents the entropy force from exploding before the Q-function is learned.
+        warmup_steps = 20000.0
+        alpha_schedule = jnp.clip(current_step / warmup_steps, 0.0, 1.0)
+        
+        # Calculate the effective alpha
+        effective_alpha = self.config["me_am_alpha"] * alpha_schedule
+
+        # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
-            # 1. Use Target Actor (Behavior) for Score
+            # Use Target Actor (Behavior) for Score
             target_actor = self.network.select("target_actor_slow")
             
-            # 2. Evaluate near t=1.0 (but not exactly 1.0) to capture manifold geometry
-            # t=0.99 is usually sharper and better than 0.9
+            # Evaluate near t=1.0 (e.g., 0.99)
             t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
             
+            # Use the "Soft-Saturated" Tweedie from our previous discussion
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             
-            # 3. Apply Gradient: 
-            # We want to maximize Entropy => Gradient is -Score
-            # Total Grad = Grad_Q + alpha * (-Score)
-            total_grad = q_grad - self.config["me_am_alpha"] * score_est
+            # Use 'effective_alpha' instead of config value
+            total_grad = q_grad - effective_alpha * score_est
         else:
             total_grad = q_grad
-        # --- ME-AM Modification
-        # --- ME-AM Modification End ---
-
         # Initialize Adjoint State. 
         # Note: QAM uses negative sign convention for 'adj' (minimizing negative reward).
         adj = -total_grad * self.config["inv_temp"]
