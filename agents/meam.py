@@ -133,17 +133,36 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
-            # Use Target Actor (Behavior) for Score
             target_actor = self.network.select("target_actor_slow")
             
-            # Evaluate near t=1.0 (e.g., 0.99)
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
+            # Evaluate slightly earlier to improve stability (0.95 vs 0.99)
+            # The vector field doesn't change much, but 1/(1-t) drops from 100 to 20!
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.95
             
-            # Use the "Soft-Saturated" Tweedie from our previous discussion
+            # Use your improved score computation
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             
-            # Use 'effective_alpha' instead of config value
-            total_grad = q_grad - effective_alpha * score_est
+            # --- STABILITY FIX: ADAPTIVE CLIPPING ---
+            # We want the score to guide the flow, not dominate it.
+            # We clip the score term so its norm is, at most, comparable to the q_grad (or a fixed constant).
+            
+            # Calculate norms
+            q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
+            score_norm = jnp.linalg.norm(score_est, axis=-1, keepdims=True) + 1e-6
+            
+            # Ratio: How much stronger is the score than the Q-gradient?
+            ratio = score_norm / q_grad_norm
+            
+            # If score is > 10x stronger than Q-grad, scale it down.
+            # This prevents the 1e8 explosion while keeping the direction.
+            damping_factor = jnp.minimum(1.0, 10.0 / ratio)
+            
+            # Apply alpha and damping
+            # We effectively cap the entropy force.
+            total_grad = q_grad - (effective_alpha * damping_factor) * score_est
+            
+            # Optional Debug: Print ratio to see how bad it was
+            # jax.debug.print("Ratio: {x}", x=ratio.mean())
         else:
             total_grad = q_grad
         # Initialize Adjoint State. 
