@@ -64,7 +64,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # Scaling: v has magnitude ~ ||x1 - x0|| (approx 2.0).
         # We don't divide by (1-t), so this never explodes.
         # This is a 'proxy' score that is stable and effective.
-        score = v 
+        score = v/(1-t)
         
         return score
 
@@ -114,7 +114,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             # 2. Evaluate near t=1.0 (but not exactly 1.0) to capture manifold geometry
             # t=0.99 is usually sharper and better than 0.9
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 1.0
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
             
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             
