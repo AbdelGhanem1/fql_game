@@ -52,72 +52,47 @@ class MEAMAgent(flax.struct.PyTreeNode):
     def compute_score_ot(actor_fn, obs, x, t):
         v = actor_fn(obs, x, t)
         
-        # 1. Recover noise
+        # 1. Recover the implicit noise (x_0)
         x_0_est = x - t * v
         
-        # 2. Linear Scaling with Safety
+        # --- THE FIX: Soft Saturation ---
+        # This prevents the linear spring explosion (F ~ x)
+        # It makes the force behave like "Wind" (constant) when x is far away.
+        # 5.0 is a reasonable bounds for Gaussian noise (5 sigma).
+        x_0_est = 5.0 * jnp.tanh(x_0_est / 5.0)
+
+        # 2. Scale by 1/(1-t)
         t_safe = jnp.clip(1.0 - t, a_min=1e-3)
         score = -x_0_est / t_safe
-        
-        # 3. SAFETY: Clip the score to prevent the feedback loop
-        # This keeps the gradient magnitude comparable to QAM's reward gradient
-        score = jnp.clip(score, -100.0, 100.0)
         
         return score
 
 
     @partial(jax.jit, static_argnames=("flow_steps"))
     def adj_matching(self, obs, rng, flow_steps=None):
-        # Standard flow setup
         flow_steps = self.config["flow_steps"] if flow_steps is None else flow_steps
-        
-        # Determine action dimension
-        if self.config["action_chunking"]:
-            action_dim = self.config['action_dim'] * self.config['horizon_length']
-        else:
-            action_dim = self.config['action_dim']
 
-        # Initial Noise
+        action_dim = self.config['action_dim'] * \
+                        (self.config['horizon_length'] if self.config["action_chunking"] else 1)
         x = jax.random.normal(rng, shape=obs.shape[:-1] + (action_dim,))
 
-        # Select target actor
         actor_slow = self.network.select("target_actor_slow" if self.config["target_actor"] else "actor_slow")
 
         h = 1 / flow_steps
         xs = [x]
         ts = []
-        
-        # --- ROBUST SDE LOOP ---
         for i, key in zip(range(flow_steps), jax.random.split(rng, flow_steps)):
-            # Explicit time calculation
-            t = i * h * jnp.ones_like(x[..., 0:1])
-            
-            # Calculate Sigma (Bridge Diffusion Coefficient)
-            # We use max(..., 0.0) to prevent NaN at the very last step if float precision wavers
-            sigma = jnp.sqrt(2 * jnp.maximum(1 - (t + h), 0.0) / (t + h))
-            
+            t = i / flow_steps * jnp.ones_like(x[..., 0:1])
+            sigma = jnp.sqrt(2 * (1 - t + h) / (t + h))
             noise = jax.random.normal(key, x.shape)
-            
-            # Get velocity from current policy
-            if self.config["residual"]:
-                v_curr = self.network.select("actor_fast")(obs, x, t) + actor_slow(obs, x, t)
-            else:
-                v_curr = self.network.select("actor_fast")(obs, x, t)
-
             if i != flow_steps - 1:
-                # SDE Step: x + h*(2v - x/(t+h))
-                # Note: (t+h) in denominator is correct for the bridge SDE starting at 0
-                drift = 2 * v_curr - x / (t + h)
-                x = x + h * drift + jnp.sqrt(h) * sigma * noise
-            else:
-                # Last step: Use ODE / Target Actor to land on manifold
-                # This matches your original logic
+                if self.config["residual"]:
+                    v = self.network.select("actor_fast")(obs, x, t) + actor_slow(obs, x, t)
+                else:
+                    v = self.network.select("actor_fast")(obs, x, t)
+                x = x + h * (2 * v - x / (t + h)) + jnp.sqrt(h) * sigma * noise
+            else:  # use ODE integration for the last step following the adjoint-matching paper
                 x = x + h * actor_slow(obs, x, t)
-
-            # --- SAFETY CLIP ---
-            # This is the line that saves you from 1e11 gradients.
-            # If the actor outputs garbage, this stops the values from reaching infinity.
-            x = jnp.clip(x, -50.0, 50.0)
 
             xs.append(x)
             ts.append(t)
@@ -141,6 +116,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
             
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
+            
             # 3. Apply Gradient: 
             # We want to maximize Entropy => Gradient is -Score
             # Total Grad = Grad_Q + alpha * (-Score)
