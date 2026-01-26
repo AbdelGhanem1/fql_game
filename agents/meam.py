@@ -66,10 +66,10 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # Stability Fix 2: Clip the noise estimate. 
         # Theoretically x_0 is N(0,1). Values > 20 are impossible/numerical errors.
         # This prevents the 1e22 explosion if x has drifted.
-        x_0_est = jnp.clip(x_0_est, -20.0, 20.0)
+        #x_0_est = jnp.clip(x_0_est, -20.0, 20.0)
 
         # 2. Scale by 1/(1-t)
-        t_safe = jnp.clip(1.0 - t, a_min=1e-3) # Relaxed clip for safety
+        t_safe = jnp.clip(1.0 - t, a_min=1e-4) # Relaxed clip for safety
         
         score = -x_0_est / t_safe
         return score
@@ -120,7 +120,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             # 2. Evaluate near t=1.0 (but not exactly 1.0) to capture manifold geometry
             # t=0.99 is usually sharper and better than 0.9
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
             
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             # 3. Apply Gradient: 
