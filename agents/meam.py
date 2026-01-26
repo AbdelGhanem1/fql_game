@@ -113,7 +113,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             # 2. Evaluate near t=1.0 (but not exactly 1.0) to capture manifold geometry
             # t=0.99 is usually sharper and better than 0.9
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
             
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             
