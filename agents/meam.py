@@ -127,6 +127,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             total_grad = q_grad - self.config["me_am_alpha"] * score_est
         else:
             total_grad = q_grad
+            print('we are in the else!!!')
         # --- ME-AM Modification
         # --- ME-AM Modification End ---
 
