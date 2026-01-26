@@ -117,7 +117,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         #alpha_schedule = jnp.clip(current_step / warmup_steps, 0.0, 1.0)
         
         # Calculate the effective alpha
-        if self.network.step > 25000.0:
+        if current_step > 25000.0:
 
             effective_alpha = self.config["me_am_alpha"] #* alpha_schedule
         else: 
