@@ -57,16 +57,16 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # 2. Gaussian Shell Projection (The Mathematical Fix)
         # We know true x0 comes from N(0, I), so ||x0|| should be approx sqrt(dim).
         # If the estimator implies an x0 way outside this shell, it is hallucinating.
-        dim = x.shape[-1]
-        target_norm = jnp.sqrt(dim)
+        #dim = x.shape[-1]
+        #target_norm = jnp.sqrt(dim)
         
         # Calculate the norm of the estimator
-        current_norm = jnp.linalg.norm(x_0_est, axis=-1, keepdims=True)
+        #current_norm = jnp.linalg.norm(x_0_est, axis=-1, keepdims=True)
         
         # Soft-Project: If norm > target, scale it down. If norm < target, keep it (allow localized noise).
         # This preserves the DIRECTION of the gradient but fixes the MAGNITUDE.
-        scale_factor = jnp.minimum(1.0, (target_norm * 1.5) / (current_norm + 1e-6))
-        x_0_clamped = x_0_est * scale_factor
+        #scale_factor = jnp.minimum(1.0, (target_norm * 1.5) / (current_norm + 1e-6))
+        #x_0_clamped = x_0_est * scale_factor
 
         # 3. Denominator Stability
         # We still need protection against t=1.0, but now the numerator is bounded.
@@ -75,7 +75,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         
         # 4. Compute Score
         # Score = - (estimated noise) / (variance of noise in current step)
-        score = -x_0_clamped / t_safe
+        score = -x_0_est / t_safe
 
         return score
 
