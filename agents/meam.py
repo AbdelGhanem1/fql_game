@@ -50,24 +50,27 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
     @staticmethod
     def compute_score_ot(actor_fn, obs, x, t):
-        """
-        Estimates the score via Tweedie's formula for OT Flow.
-        Relationship: x_t = (1-t)x_0 + t x_1
-        Therefore, noise x_0 = x_t - t * v_t  (since v_t = x_1 - x_0)
-        
-        Score = -x_0 / sigma_t
-              = -(x_t - t * v_t) / (1-t)
-        """
         v = actor_fn(obs, x, t)
         
+        # Stability Fix 1: Ensure shapes are broadcastable
+        # t might be (Batch, 1), x is (Batch, Dim). JAX handles this, but be explicit.
+        
         # 1. Recover the implicit noise (x_0)
-        # Note: Your original 'v-x' was an approx. 'x - t*v' is exact.
         x_0_est = x - t * v
         
-        # 2. Scale by 1/(1-t) to get the score
-        t_safe = jnp.clip(1.0 - t, a_min=1e-4)
+        # DEBUG: Print these values once to confirm the explosion source
+        jax.debug.print("x norm: {x}", x=jnp.linalg.norm(x))
+        jax.debug.print("v norm: {v}", v=jnp.linalg.norm(v))
+        jax.debug.print("x0 est: {x0}", x0=jnp.linalg.norm(x_0_est))
+
+        # Stability Fix 2: Clip the noise estimate. 
+        # Theoretically x_0 is N(0,1). Values > 20 are impossible/numerical errors.
+        # This prevents the 1e22 explosion if x has drifted.
+        x_0_est = jnp.clip(x_0_est, -20.0, 20.0)
+
+        # 2. Scale by 1/(1-t)
+        t_safe = jnp.clip(1.0 - t, a_min=1e-3) # Relaxed clip for safety
         
-        # Note: Direction is negative noise. 
         score = -x_0_est / t_safe
         return score
 
@@ -120,14 +123,12 @@ class MEAMAgent(flax.struct.PyTreeNode):
             t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.9
             
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
-            print('the value of me_am_alpha: ', self.config["me_am_alpha"])
             # 3. Apply Gradient: 
             # We want to maximize Entropy => Gradient is -Score
             # Total Grad = Grad_Q + alpha * (-Score)
             total_grad = q_grad - self.config["me_am_alpha"] * score_est
         else:
             total_grad = q_grad
-            print('we are in the else!!!')
         # --- ME-AM Modification
         # --- ME-AM Modification End ---
 
