@@ -51,19 +51,24 @@ class MEAMAgent(flax.struct.PyTreeNode):
     @staticmethod
     def compute_score_ot(actor_fn, obs, x, t):
         """
-        Estimates the score via Tweedie's formula adapted for OT Flow.
-        Relationship: x_0 = x_t - t * v_t
-        Score(x_t) ~ -x_0 / (1-t)  (Derived from Gaussian noise assumption)
-                   ~ -(x_t - t*v_t) / (1-t) ?? 
-                   Actually, simplest approximation for OT:
-                   Score ~ (v_t - x_t) / (1-t)
+        Estimates the score via Tweedie's formula for OT Flow.
+        Relationship: x_t = (1-t)x_0 + t x_1
+        Therefore, noise x_0 = x_t - t * v_t  (since v_t = x_1 - x_0)
+        
+        Score = -x_0 / sigma_t
+              = -(x_t - t * v_t) / (1-t)
         """
         v = actor_fn(obs, x, t)
-        # We clip (1-t) to avoid division by zero stability issues near t=1
-        t_safe = jnp.clip(1.0 - t, a_min=1e-4) 
         
-        # FIX: Subtract x from v to get the correct noise-cancellation direction
-        score = (v - x) / t_safe
+        # 1. Recover the implicit noise (x_0)
+        # Note: Your original 'v-x' was an approx. 'x - t*v' is exact.
+        x_0_est = x - t * v
+        
+        # 2. Scale by 1/(1-t) to get the score
+        t_safe = jnp.clip(1.0 - t, a_min=1e-4)
+        
+        # Note: Direction is negative noise. 
+        score = -x_0_est / t_safe
         return score
 
 
@@ -107,20 +112,22 @@ class MEAMAgent(flax.struct.PyTreeNode):
         q_grad = grad_fn(obs, xs[-1]) 
         
         if self.config["me_am_alpha"] > 0.:
+            # 1. Use Target Actor (Behavior) for Score
             target_actor = self.network.select("target_actor_slow")
             
-            # Recommendation: Increase t_eval to 0.99 for sharper manifold definition
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99 
+            # 2. Evaluate near t=1.0 (but not exactly 1.0) to capture manifold geometry
+            # t=0.99 is usually sharper and better than 0.9
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
             
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
-            
-            # This gradient logic remains CORRECT:
-            # We want to ASCENT on H, so we move in direction of Gradient(H).
-            # Gradient(H) = -Score.
-            # Total Gradient = Grad_Q + alpha * Grad_H = Grad_Q - alpha * Score.
+            print('the value of me_am_alpha: ', self.config["me_am_alpha"])
+            # 3. Apply Gradient: 
+            # We want to maximize Entropy => Gradient is -Score
+            # Total Grad = Grad_Q + alpha * (-Score)
             total_grad = q_grad - self.config["me_am_alpha"] * score_est
         else:
             total_grad = q_grad
+        # --- ME-AM Modification
         # --- ME-AM Modification End ---
 
         # Initialize Adjoint State. 
