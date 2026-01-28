@@ -144,10 +144,20 @@ class MEAMAgent(flax.struct.PyTreeNode):
             # We want the score to guide the flow, not dominate it.
             # We clip the score term so its norm is, at most, comparable to the q_grad (or a fixed constant).
             
-
+            # Calculate norms
+            q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
+            score_norm = jnp.linalg.norm(score_est, axis=-1, keepdims=True) + 1e-6
+            
+            # Ratio: How much stronger is the score than the Q-gradient?
+            ratio = score_norm / q_grad_norm
+            
+            # If score is > 10x stronger than Q-grad, scale it down.
+            # This prevents the 1e8 explosion while keeping the direction.
+            damping_factor = jnp.minimum(1.0, 1.0 / ratio)
+            
             # Apply alpha and damping
             # We effectively cap the entropy force.
-            total_grad = q_grad - (effective_alpha) * score_est
+            total_grad = q_grad - (effective_alpha * damping_factor) * score_est
             
             # Optional Debug: Print ratio to see how bad it was
             # jax.debug.print("Ratio: {x}", x=ratio.mean())
