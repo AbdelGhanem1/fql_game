@@ -52,7 +52,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
     def compute_score_ot(actor_fn, obs, x, t):
         # 1. Get velocity and estimate initial noise x0
         v = actor_fn(obs, x, t)
-        x_0_est = x - t * v
+        x_0_est = t * v - x
 
         # 2. Gaussian Shell Projection (The Mathematical Fix)
         # We know true x0 comes from N(0, I), so ||x0|| should be approx sqrt(dim).
@@ -71,11 +71,11 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # 3. Denominator Stability
         # We still need protection against t=1.0, but now the numerator is bounded.
         # Using a smooth max is mathematically cleaner than clip.
-        t_safe = jnp.maximum(1.0 - t, 1e-3)
+        t_safe = jnp.maximum(1.0 - t, 1e-6)
         
         # 4. Compute Score
         # Score = - (estimated noise) / (variance of noise in current step)
-        score = -x_0_est / t_safe
+        score = x_0_est / t_safe
 
         return score
 
@@ -133,7 +133,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
-            target_actor = self.network.select("target_actor_slow")
+            target_actor = self.network.select("target_actor_fast")
             
             # Evaluate slightly earlier to improve stability (0.95 vs 0.99)
             # The vector field doesn't change much, but 1/(1-t) drops from 100 to 20!
@@ -146,20 +146,10 @@ class MEAMAgent(flax.struct.PyTreeNode):
             # We want the score to guide the flow, not dominate it.
             # We clip the score term so its norm is, at most, comparable to the q_grad (or a fixed constant).
             
-            # Calculate norms
-            q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
-            score_norm = jnp.linalg.norm(score_est, axis=-1, keepdims=True) + 1e-6
-            
-            # Ratio: How much stronger is the score than the Q-gradient?
-            ratio = score_norm / q_grad_norm
-            
-            # If score is > 10x stronger than Q-grad, scale it down.
-            # This prevents the 1e8 explosion while keeping the direction.
-            damping_factor = jnp.minimum(1.0, 5.0 / ratio)
-            
+
             # Apply alpha and damping
             # We effectively cap the entropy force.
-            total_grad = q_grad - (effective_alpha * damping_factor) * score_est
+            total_grad = q_grad - (effective_alpha) * score_est
             
             # Optional Debug: Print ratio to see how bad it was
             # jax.debug.print("Ratio: {x}", x=ratio.mean())
