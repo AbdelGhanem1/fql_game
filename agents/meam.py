@@ -135,10 +135,10 @@ class MEAMAgent(flax.struct.PyTreeNode):
         if self.config["me_am_alpha"] > 0.:
             target_actor = self.network.select("target_actor_fast")
             h = 1 / flow_steps
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * (1.0 - h)
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * (0.99)
             
             # Use your improved score computation
-            score_est = self.compute_score_ot(target_actor, obs, xs[-2], t_eval)
+            score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
             
             # --- STABILITY FIX: ADAPTIVE CLIPPING ---
             # We want the score to guide the flow, not dominate it.
@@ -157,15 +157,15 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             # Apply alpha and damping
             # We effectively cap the entropy force.
-            total_grad = q_grad - (effective_alpha * damping_factor) * score_est
+            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha * damping_factor) * score_est
             
             # Optional Debug: Print ratio to see how bad it was
             # jax.debug.print("Ratio: {x}", x=ratio.mean())
         else:
-            total_grad = q_grad
+            total_grad = q_grad * self.config["inv_temp"]
         # Initialize Adjoint State. 
         # Note: QAM uses negative sign convention for 'adj' (minimizing negative reward).
-        adj = -total_grad * self.config["inv_temp"]
+        adj = -total_grad
         
         pre_adj_info = {
             "adj_max": jnp.abs(adj).max(),
