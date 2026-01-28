@@ -129,7 +129,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         #alpha_schedule = jnp.clip(current_step / warmup_steps, 0.0, 1.0)
         
         # Instead of Python 'if', use JAX's 'where'
-        effective_alpha = jnp.where(current_step > 1.0, self.config["me_am_alpha"], 0.0)
+        effective_alpha = jnp.where(current_step > 10000.0, self.config["me_am_alpha"], 0.0)
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
