@@ -133,10 +133,10 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
-            target_actor = self.network.select("target_actor_slow")
+            target_actor = self.network.select("target_actor_fast")
             h = 1 / flow_steps
             t_eval = jnp.ones_like(xs[-1][..., 0:1]) * (0.99)
-            
+
             
             # Use your improved score computation
             score_est = self.compute_score_ot(target_actor, obs, xs[-1], t_eval)
