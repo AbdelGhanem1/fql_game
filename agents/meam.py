@@ -123,13 +123,14 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # We access the current step from the network state
         current_step = self.network.step 
         
-        # Define Warmup: 0 to 20,000 steps
-        # This prevents the entropy force from exploding before the Q-function is learned.
-        #warmup_steps = 100000.0
-        #alpha_schedule = jnp.clip(current_step / warmup_steps, 0.0, 1.0)
-        
         # Instead of Python 'if', use JAX's 'where'
         effective_alpha = jnp.where(current_step > 0.0, self.config["me_am_alpha"], 0.0)
+
+        # --- [LOGGING PREP] Initialize placeholders ---
+        q_grad_norm_val = 0.0
+        score_norm_val = 0.0
+        ratio_val = 0.0
+        damping_factor_val = 0.0
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
@@ -139,14 +140,11 @@ class MEAMAgent(flax.struct.PyTreeNode):
             h = 1 / flow_steps
             t_eval = jnp.ones_like(xs[-1][..., 0:1]) * (0.99)
 
-            
             # Use your improved score computation
             score_est1 = self.compute_score_ot(target_actor1, obs, xs[-1], t_eval)
             score_est2 = self.compute_score_ot(target_actor2, obs, xs[-1], t_eval)
             
             # --- STABILITY FIX: ADAPTIVE CLIPPING ---
-            # We want the score to guide the flow, not dominate it.
-            # We clip the score term so its norm is, at most, comparable to the q_grad (or a fixed constant).
             
             # Calculate norms
             q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
@@ -156,15 +154,17 @@ class MEAMAgent(flax.struct.PyTreeNode):
             ratio = score_norm / q_grad_norm
             
             # If score is > 10x stronger than Q-grad, scale it down.
-            # This prevents the 1e8 explosion while keeping the direction.
             damping_factor = jnp.minimum(1.0, 1.0 / ratio)
             
+            # --- [LOGGING CAPTURE] ---
+            q_grad_norm_val = q_grad_norm.mean()
+            score_norm_val = score_norm.mean()
+            ratio_val = ratio.mean()
+            damping_factor_val = damping_factor.mean()
+
             # Apply alpha and damping
-            # We effectively cap the entropy force.
             total_grad = q_grad * self.config["inv_temp"] - (effective_alpha * damping_factor) * (score_est1 + score_est2)
             
-            # Optional Debug: Print ratio to see how bad it was
-            # jax.debug.print("Ratio: {x}", x=ratio.mean())
         else:
             total_grad = q_grad * self.config["inv_temp"]
         # Initialize Adjoint State. 
@@ -175,6 +175,11 @@ class MEAMAgent(flax.struct.PyTreeNode):
             "adj_max": jnp.abs(adj).max(),
             "adj_std": jnp.abs(adj).std(),
             "adj_mean": jnp.abs(adj).mean(),
+            # --- [LOGGING OUTPUT] ---
+            "q_grad_norm": q_grad_norm_val,
+            "score_norm": score_norm_val,
+            "ratio": ratio_val,
+            "damping_factor": damping_factor_val,
         }
         
         adjs = []
