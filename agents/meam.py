@@ -134,7 +134,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
-            target_actor1 = self.network.select("target_actor_fast")
+            target_actor1 = self.network.select("target_actor_slow")
             #target_actor2 = self.network.select("target_actor_slow")
 
             h = 1 / flow_steps
@@ -163,7 +163,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             damping_factor_val = damping_factor.mean()
 
             # Apply alpha and damping
-            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha) * (score_est1)
+            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha * damping_factor) * (score_est1)
             
         else:
             total_grad = q_grad * self.config["inv_temp"]
