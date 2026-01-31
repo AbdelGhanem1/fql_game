@@ -86,8 +86,6 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         action_dim = self.config['action_dim'] * \
                         (self.config['horizon_length'] if self.config["action_chunking"] else 1)
-        
-        # 1. Initialize from noise (Standard Gaussian Source)
         x = jax.random.normal(rng, shape=obs.shape[:-1] + (action_dim,))
 
         actor_slow = self.network.select("target_actor_slow" if self.config["target_actor"] else "actor_slow")
@@ -95,66 +93,108 @@ class MEAMAgent(flax.struct.PyTreeNode):
         h = 1 / flow_steps
         xs = [x]
         ts = []
-        
-        # 2. Deterministic Forward Pass (ODE Integration)
-        # We use the Base Model (actor_slow) to generate the trajectory.
-        for i in range(flow_steps):
+        for i, key in zip(range(flow_steps), jax.random.split(rng, flow_steps)):
             t = i / flow_steps * jnp.ones_like(x[..., 0:1])
-            
-            # Standard ODE update: dx = v(x,t) dt
-            v = actor_slow(obs, x, t)
-            x = x + h * v
+            sigma = jnp.sqrt(2 * (1 - t + h) / (t + h))
+            noise = jax.random.normal(key, x.shape)
+            if i != flow_steps - 1:
+                if self.config["residual"]:
+                    v = self.network.select("actor_fast")(obs, x, t) + actor_slow(obs, x, t)
+                else:
+                    v = self.network.select("actor_fast")(obs, x, t)
+                x = x + h * (2 * v - x / (t + h)) + jnp.sqrt(h) * sigma * noise
+            else:  # use ODE integration for the last step following the adjoint-matching paper
+                x = x + h * actor_slow(obs, x, t)
 
             xs.append(x)
             ts.append(t)
 
-        # 3. Adjoint Initialization (Terminal Condition)
-        # lambda(1) = grad(Reward). Since we maximize Q, we take the positive gradient.
+        # Compute the critic's action gradient as the adjoint state initialization
         critic_network = "target_critic" if self.config["use_target_grad"] else "critic"
-        
-        # Define Q-function wrapper to take gradient w.r.t action
-        def q_fn(obs, action):
-            q_values = self.network.select(critic_network)(obs, action)
-            # Clip gradient if configured, though strictly strictly speaking PMP uses the raw gradient
-            if self.config['clip_adj']:
-                return q_values.mean(axis=0).sum()
-            return q_values.mean(axis=0).sum()
+        if self.config['clip_adj']:
+            grad_fn = jax.grad(lambda x, y: self.network.select(critic_network)(x, jnp.clip(y, -1., 1.)).mean(axis=0).sum(), 1)
+        else:
+            grad_fn = jax.grad(lambda x, y: self.network.select(critic_network)(x, y).mean(axis=0).sum(), 1)
 
-        grad_fn = jax.grad(q_fn, 1)
+        # q_grad = Gradient of Q w.r.t action (Direction of high Reward)
+        q_grad = grad_fn(obs, xs[-1]) 
         
-        # Calculate terminal adjoint: lambda_1 = inv_temp * grad_a Q(s, a_1)
-        # Note: We use positive sign here (Ascent) vs original code's negative sign (Descent)
-        adj = grad_fn(obs, xs[-1]) * self.config["inv_temp"]
+        # === [STEP 2] Insert Alpha Scheduling Here ===
+        # We access the current step from the network state
+        current_step = self.network.step 
+        
+        # Instead of Python 'if', use JAX's 'where'
+        effective_alpha = jnp.where(current_step > 0.0, self.config["me_am_alpha"], 0.0)
+
+        # --- [LOGGING PREP] Initialize placeholders ---
+        q_grad_norm_val = 0.0
+        score_norm_val = 0.0
+        ratio_val = 0.0
+        damping_factor_val = 0.0
+
+        # === [STEP 3] Apply Score with Effective Alpha ===
+        if self.config["me_am_alpha"] > 0.:
+            target_actor1 = self.network.select("target_actor_slow")
+            #target_actor2 = self.network.select("target_actor_slow")
+
+            h = 1 / flow_steps
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * (1-h)
+
+            # Use your improved score computation
+            score_est1 = self.compute_score_ot(target_actor1, obs, xs[-2], t_eval)
+            #score_est2 = self.compute_score_ot(target_actor2, obs, xs[-1], t_eval)
+            
+            # --- STABILITY FIX: ADAPTIVE CLIPPING ---
+            
+            # Calculate norms
+            q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
+            score_norm = jnp.linalg.norm(score_est1, axis=-1, keepdims=True) + 1e-6
+            
+            # Ratio: How much stronger is the score than the Q-gradient?
+            ratio = score_norm / q_grad_norm
+            
+            # If score is > 10x stronger than Q-grad, scale it down.
+            damping_factor = jnp.minimum(1.0, 1.0 / ratio)
+            
+            # --- [LOGGING CAPTURE] ---
+            q_grad_norm_val = q_grad_norm.mean()
+            score_norm_val = score_norm.mean()
+            ratio_val = ratio.mean()
+            damping_factor_val = damping_factor.mean()
+
+            # Apply alpha and damping
+            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha * damping_factor) * (score_est1)
+            
+        else:
+            total_grad = q_grad * self.config["inv_temp"]
+        # Initialize Adjoint State. 
+        # Note: QAM uses negative sign convention for 'adj' (minimizing negative reward).
+        adj = -total_grad
         
         pre_adj_info = {
             "adj_max": jnp.abs(adj).max(),
             "adj_std": jnp.abs(adj).std(),
             "adj_mean": jnp.abs(adj).mean(),
+            # --- [LOGGING OUTPUT] ---
+            "q_grad_norm": q_grad_norm_val,
+            "score_norm": score_norm_val,
+            "ratio": ratio_val,
+            "damping_factor": damping_factor_val,
         }
-        adjs = []
         
-        # 4. Deterministic Backward Pass (Adjoint Evolution)
-        # Solve: d(lambda)/dt = - (grad_x v)^T * lambda
+        adjs = []
         for i in reversed(range(flow_steps)):
             t = (i / flow_steps) * jnp.ones_like(x[..., 0:1])
 
-            # The dynamics function is just the base velocity field
-            def dynamics_fn(xi):
-                return actor_slow(obs, xi, t) 
+            def fn(xi):
+                return 2 * actor_slow(obs, xi, t + h) - xi / (t + h)
             
-            # Use VJP to compute (grad_v)^T * adj without instantiating the Jacobian
-            # Note: We use t instead of t+h in dynamics_fn to align with the step i, 
-            # but using t+h (next step) is also a valid discretization choice. 
-            # Consistent with forward pass, we use the state at i.
-            vjp = jax.vjp(dynamics_fn, xs[i])[1](adj)[0]
-            
-            # Euler update: lambda_{t} = lambda_{t+h} + h * (grad_v)^T lambda_{t+h}
-            # The ODE is d_lambda = -grad^T lambda. Backward means we ADD the gradient term.
+            vjp = jax.vjp(fn, xs[i])[1](adj)[0]
             adj = adj + h * vjp
             
             adjs.append(adj)
-            
         return jnp.stack(xs[:-1], axis=0), jnp.stack(list(reversed(adjs)), axis=0), jnp.stack(ts, axis=0), pre_adj_info
+    
 
     def actor_loss(self, batch, grad_params, rng):
         if self.config["action_chunking"]:
@@ -163,11 +203,30 @@ class MEAMAgent(flax.struct.PyTreeNode):
             batch_actions = batch["actions"][..., 0, :]
         
         batch_size, action_dim = batch_actions.shape
-        rng, x_rng, t_rng, adj_rng, edit_rng = jax.random.split(rng, 5)
+        # Added dilation_rng to the split
+        rng, x_rng, t_rng, adj_rng, edit_rng, dilation_rng = jax.random.split(rng, 6)
 
-        ## BC flow-matching loss (unchanged)
+        ## BC flow-matching loss.
         x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
-        x_1 = batch_actions
+        
+        # === [DILATED PRIOR IMPLEMENTATION] ===
+        # If dilation_sigma > 0, we perturb the target actions for the behavior flow.
+        # This "thickens" the manifold of actor_slow.
+        if self.config["dilation_sigma"] > 0.0:
+            dilation_noise = jax.random.normal(dilation_rng, (batch_size, action_dim))
+            # Optional: Clip the noise to prevent extreme outliers? 
+            # For pure VRM, standard Gaussian is correct, but clipping at 3*sigma is often safer for stability.
+            # Here we keep it pure Gaussian as per your paper draft.
+            x_1 = batch_actions + dilation_noise * self.config["dilation_sigma"]
+            # Important: Re-clip to valid action space if necessary? 
+            # Usually for flow matching we want the vector field to point strictly to the data.
+            # If we noise it outside [-1, 1], the flow learns to push outside.
+            # Ideally, we clip *after* noise if strict bounds are required, or let it be if we want "soft" bounds.
+            # Let's clip to [-1, 1] to ensure the prior remains valid within environment bounds.
+            x_1 = jnp.clip(x_1, -1, 1) 
+        else:
+            x_1 = batch_actions
+            
         t = jax.random.uniform(t_rng, (batch_size, 1))
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
@@ -180,28 +239,22 @@ class MEAMAgent(flax.struct.PyTreeNode):
         total_fast_loss = 0
         actor_slow = self.network.select("target_actor_slow" if self.config["target_actor"] else "actor_slow")
         
-        ## Deterministic Adjoint Matching
-        # Compute the adjoint states (Target Direction)
+        ## Adjoint-matching
+        # Compute the adjoint states
         xs, adjs, ts, pre_adj_info = self.adj_matching(batch["observations"], adj_rng)
-        
-        # Expand observations to match the time dimension (flow_steps, batch, dim)
+        h = 1 / self.config["flow_steps"]
+        sigmas = jnp.sqrt(2 * (1 - ts + h) / (ts + h))
+
         observations = jnp.repeat(batch["observations"][None], self.config["flow_steps"], axis=0)
-        
-        # Student Model (v_theta)
         vf_fine = self.network.select("actor_fast")(observations, xs, ts, params=grad_params)
 
-        # Base Model (v_base)
         vf_base = actor_slow(observations, xs, ts)
         
-        # Compute the DOT Loss: Minimize Relative Kinetic Energy
-        # Target: v_theta \approx v_base + lambda
-        # Loss: || v_theta - (v_base + lambda) ||^2
+        # Compute the adjoint matching loss
         if self.config["residual"]:
-            # If model predicts residual directly: || v_residual - lambda ||^2
-            adj_loss = jnp.sum(jnp.square(vf_fine - adjs), axis=-1)
+            adj_loss = jnp.sum(jnp.square(vf_fine * 2 / sigmas + sigmas * adjs), axis=-1)
         else:
-            # If model predicts full velocity: || (v_fine - v_base) - lambda ||^2
-            adj_loss = jnp.sum(jnp.square((vf_fine - vf_base) - adjs), axis=-1)
+            adj_loss = jnp.sum(jnp.square((vf_fine - vf_base) * 2 / sigmas + sigmas * adjs), axis=-1)
 
         adj_loss = jnp.mean(jnp.sum(adj_loss, axis=0))
 
@@ -209,7 +262,6 @@ class MEAMAgent(flax.struct.PyTreeNode):
         info.update(pre_adj_info)
         total_fast_loss += adj_loss
 
-        # FQL and Edit Policy sections (unchanged, but kept for context)
         if self.config["fql_alpha"] > 0.:
             edit_base_rng, edit_rng = jax.random.split(edit_rng, 2)
             fql_noises = jax.random.normal(edit_base_rng, (batch_size, action_dim))
@@ -222,6 +274,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
                 params=grad_params)
             fql_distill_loss = jnp.mean((flow_actions - os_actions) ** 2)
             
+            # FQL loss.
             os_actions = jnp.clip(os_actions, -1, 1)
             fql_qs = self.network.select(f'critic')(batch['observations'], actions=os_actions)
             fql_q = jnp.mean(fql_qs, axis=0)
@@ -246,6 +299,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             
             edited_actions = flow_actions + edit * self.config["edit_scale"]
             
+            # Edit policy loss.
             edited_actions = jnp.clip(edited_actions, -1, 1)
             qs = self.network.select(f'critic')(batch['observations'], actions=edited_actions)
             q = jnp.mean(qs, axis=0)
@@ -266,7 +320,6 @@ class MEAMAgent(flax.struct.PyTreeNode):
             info["edit_alpha"] = alpha
 
         return actor_loss + total_fast_loss, {'flow_loss': flow_loss, "fast_loss": total_fast_loss, **info}
-
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
         info = {}
@@ -494,9 +547,14 @@ def get_config():
             inv_temp=0.3,   # Inverse temperature that controls the influence of Q for QAM
             fql_alpha=0.,   # If > 0 train a one-step policy that is distilled from the QAM flow policy while maximizing Q
             edit_scale=0.,  # If > 0 train an edit policy that refines the output of the QAM flow policy to maximize Q,
-
-            me_am_alpha=1.0,
             
+            # === [Entropy Maximization] ===
+            me_am_alpha=1.0, 
+            
+            # === [Dilated Prior] ===
+            dilation_sigma=0.1, # Sigma for Gaussian convolution of the behavior prior. 
+                                # 0.0 = Standard Behavior Prior. 0.01-0.1 is a reasonable start.
+
             ## Other variants/hyperparamter(s)
             target_actor=True,
             residual=False,
@@ -508,4 +566,3 @@ def get_config():
         )
     )
     return config
-
