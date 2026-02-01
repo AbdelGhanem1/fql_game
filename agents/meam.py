@@ -555,7 +555,7 @@ def get_config():
             me_am_alpha=1.0, 
             
             # === [Dilated Prior] ===
-            dilation_sigma=0.1, # Sigma for Gaussian convolution of the behavior prior. 
+            mixture_prob=0.1, # Sigma for Gaussian convolution of the behavior prior. 
                                 # 0.0 = Standard Behavior Prior. 0.01-0.1 is a reasonable start.
 
             ## Other variants/hyperparamter(s)
