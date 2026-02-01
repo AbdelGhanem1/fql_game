@@ -203,27 +203,30 @@ class MEAMAgent(flax.struct.PyTreeNode):
             batch_actions = batch["actions"][..., 0, :]
         
         batch_size, action_dim = batch_actions.shape
-        # Added dilation_rng to the split
-        rng, x_rng, t_rng, adj_rng, edit_rng, dilation_rng = jax.random.split(rng, 6)
+        # Add mixture_rng to the split
+        rng, x_rng, t_rng, adj_rng, edit_rng, dilation_rng, mixture_rng = jax.random.split(rng, 7)
 
         ## BC flow-matching loss.
         x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
         
-        # === [DILATED PRIOR IMPLEMENTATION] ===
-        # If dilation_sigma > 0, we perturb the target actions for the behavior flow.
-        # This "thickens" the manifold of actor_slow.
-        if self.config["dilation_sigma"] > 0.0:
-            dilation_noise = jax.random.normal(dilation_rng, (batch_size, action_dim))
-            # Optional: Clip the noise to prevent extreme outliers? 
-            # For pure VRM, standard Gaussian is correct, but clipping at 3*sigma is often safer for stability.
-            # Here we keep it pure Gaussian as per your paper draft.
-            x_1 = batch_actions + dilation_noise * self.config["dilation_sigma"]
-            # Important: Re-clip to valid action space if necessary? 
-            # Usually for flow matching we want the vector field to point strictly to the data.
-            # If we noise it outside [-1, 1], the flow learns to push outside.
-            # Ideally, we clip *after* noise if strict bounds are required, or let it be if we want "soft" bounds.
-            # Let's clip to [-1, 1] to ensure the prior remains valid within environment bounds.
-            x_1 = jnp.clip(x_1, -1, 1) 
+        # === [MIXTURE PRIOR IMPLEMENTATION] ===
+        # With probability `mixture_prob`, we target a random uniform action.
+        # This teaches the flow that the "void" is valid, just low density.
+        
+        # 1. Generate Uniform Noise targets (-1 to 1)
+        random_actions = jax.random.uniform(mixture_rng, shape=batch_actions.shape, minval=-1.0, maxval=1.0)
+        
+        # 2. Create a mask: 1 if we swap, 0 if we keep data
+        if self.config["mixture_prob"] > 0.0:
+            # We use a Bernoulli mask per sample in the batch
+            mixture_mask = jax.random.bernoulli(mixture_rng, p=self.config["mixture_prob"], shape=(batch_size, 1))
+            # Broadcast mask to action dim
+            mixture_mask = mixture_mask.astype(jnp.float32)
+            
+            # 3. Mix: (1 - mask) * Data + mask * Uniform
+            x_1_base = batch_actions 
+            x_1 = (1.0 - mixture_mask) * x_1_base + mixture_mask * random_actions
+            
         else:
             x_1 = batch_actions
             
