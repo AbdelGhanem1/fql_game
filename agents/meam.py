@@ -156,7 +156,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             # If score is > 10x stronger than Q-grad, scale it down.
             damping_factor = jnp.minimum(1.0, 1.0 / ratio)
             
-            # --- [LOGGING CAPTURE] ---
+            
             q_grad_norm_val = q_grad_norm.mean()
             score_norm_val = score_norm.mean()
             ratio_val = ratio.mean()
