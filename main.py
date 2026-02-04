@@ -108,7 +108,8 @@ class LoggingHelper:
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
 def main(_):
-    exp_name = get_exp_name(FLAGS)
+    # Check for WANDB_NAME in environment, otherwise fall back to default logic
+    exp_name = os.environ.get('WANDB_NAME') or get_exp_name(FLAGS)
     run = setup_wandb(project='qam-reproduce', group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     
