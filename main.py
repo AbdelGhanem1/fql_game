@@ -43,7 +43,7 @@ flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 config_flags.DEFINE_config_file('agent', 'agents/meam.py', lock_config=False)
 
 flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use")
-flags.DEFINE_integer('dataset_replace_interval', 5000, 'Dataset replace interval')
+flags.DEFINE_integer('dataset_replace_interval', 10000, 'Dataset replace interval')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 flags.DEFINE_integer('files_per_load', 5, "Number of dataset files to load and merge at once")
 
