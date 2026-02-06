@@ -45,7 +45,7 @@ flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use"
 flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 # NEW FLAG to control batch loading
-flags.DEFINE_integer('files_per_load', 10, "Number of dataset files to load and merge at once")
+flags.DEFINE_integer('files_per_load', 30, "Number of dataset files to load and merge at once")
 
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
