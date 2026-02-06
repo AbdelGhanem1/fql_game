@@ -42,11 +42,8 @@ flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 config_flags.DEFINE_config_file('agent', 'agents/meam.py', lock_config=False)
 
 flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use")
-flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval')
+flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval, used for large datasets because of memory constraints')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
-
-# Set default to 3 to be safe, but code is now optimized to handle this better
-flags.DEFINE_integer('files_per_load', 3, "Number of dataset files to load and merge at once")
 
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
@@ -67,6 +64,7 @@ def restore_csv_loggers(csv_loggers, save_dir):
             csv_logger.restore(os.path.join(save_dir, f"{prefix}_sv.csv"))
 
 def save_buffer_env_state(buffer, env, action_queue, save_dir):
+
     state = env.get_state()
     env_state = {}
     env_state["env_qpos"] = np.copy(state["qpos"])
@@ -86,8 +84,10 @@ def restore_buffer_env_state(restore_path):
     size = buffer_dict.pop("size")
 
     state = {}
+
     state["qpos"] = buffer_dict.pop("env_qpos")
     state["qvel"] = buffer_dict.pop("env_qvel")
+
     if "env_button_states" in buffer_dict:
         state["button_states"] = buffer_dict.pop("env_button_states")
     if "action_queue" in buffer_dict:
@@ -99,91 +99,26 @@ class LoggingHelper:
     def __init__(self, csv_loggers, wandb_logger):
         self.csv_loggers = csv_loggers
         self.wandb_logger = wandb_logger
+        self.first_time = time.time()
+        self.last_time = time.time()
 
     def log(self, data, prefix, step):
         assert prefix in self.csv_loggers, prefix
         self.csv_loggers[prefix].log(data, step=step)
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
-# --- CORRECTED HELPER FUNCTIONS ---
-
-def apply_dataset_processing_to_dict(ds_dict):
-    """
-    Applies proportion and sparse rewards to a RAW DICTIONARY.
-    Does NOT convert to Dataset object yet.
-    """
-    if FLAGS.dataset_proportion < 1.0:
-        # Assuming 'masks' or 'observations' exists to determine length
-        length_key = 'masks' if 'masks' in ds_dict else 'observations'
-        total_len = len(ds_dict[length_key])
-        new_size = int(total_len * FLAGS.dataset_proportion)
-        ds_dict = {k: v[:new_size] for k, v in ds_dict.items()}
-    
-    if FLAGS.sparse:
-        # Modify rewards in place or create new array
-        sparse_rewards = (ds_dict["rewards"] != 0.0) * -1.0
-        ds_dict["rewards"] = sparse_rewards
-        
-    return ds_dict
-
-def load_dataset_chunk(env, dataset_paths, start_idx, num_files):
-    """
-    Loads raw numpy dicts, merges them, and ONLY THEN creates the Dataset object.
-    This prevents memory spikes.
-    """
-    raw_dicts = []
-    current_idx = start_idx
-    
-    print(f"Loading {num_files} files starting from index {start_idx}...", flush=True)
-    
-    for _ in range(num_files):
-        current_idx = (current_idx + 1) % len(dataset_paths)
-        path = dataset_paths[current_idx]
-        
-        # Load raw dict
-        ds_dict, _ = make_ogbench_env_and_datasets(
-            FLAGS.env_name,
-            dataset_path=path,
-            compact_dataset=False,
-            dataset_only=True,
-            cur_env=env,
-        )
-        
-        # Apply processing to the RAW DICT (cheap)
-        ds_dict = apply_dataset_processing_to_dict(ds_dict)
-        raw_dicts.append(ds_dict)
-
-    # Concatenate raw numpy arrays (Efficient)
-    keys = raw_dicts[0].keys()
-    merged_data = {}
-    for k in keys:
-        merged_data[k] = np.concatenate([d[k] for d in raw_dicts], axis=0)
-    
-    print(f"Merged dataset size: {merged_data['observations'].shape[0]}", flush=True)
-    
-    # Create Dataset object only ONCE at the end
-    return Dataset.create(**merged_data), current_idx
-
 def main(_):
+    # Check for WANDB_NAME in environment, otherwise fall back to default logic
     exp_name = os.environ.get('WANDB_NAME') or get_exp_name(FLAGS)
     run = setup_wandb(project='qam-reproduce', group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     
-    random.seed(FLAGS.seed)
-    np.random.seed(FLAGS.seed)
-
-    online_rng, rng = jax.random.split(jax.random.PRNGKey(FLAGS.seed), 2)
-    
-    config = FLAGS.agent
-    discount = FLAGS.agent.discount
-    config["horizon_length"] = FLAGS.horizon_length
-
     # data loading
-    dataset_idx = 0
-    dataset_paths = []
-    
     if FLAGS.ogbench_dataset_dir is not None:
+        # custom ogbench dataset
         assert FLAGS.dataset_replace_interval != 0
+        # assert FLAGS.dataset_proportion == 1.0
+        dataset_idx = 0
         dataset_paths = [
             file for file in sorted(glob.glob(f"{FLAGS.ogbench_dataset_dir}/*.npz")) if '-val.npz' not in file
         ]
@@ -194,39 +129,50 @@ def main(_):
             print("actual data proportion:", num_subset_datasets / num_datasets)
             dataset_paths = dataset_paths[:num_subset_datasets]
 
-        # Initial load
-        env, eval_env, train_dataset_dict, val_dataset = make_ogbench_env_and_datasets(
+        env, eval_env, train_dataset, val_dataset = make_ogbench_env_and_datasets(
             FLAGS.env_name,
             dataset_path=dataset_paths[dataset_idx],
             compact_dataset=False,
         )
-        
-        # Process initial dict
-        train_dataset_dict = apply_dataset_processing_to_dict(train_dataset_dict)
-
-        # Optimization: If files_per_load > 1, immediately load the rest
-        if FLAGS.files_per_load > 1:
-            print("Augmenting initial dataset with more files...")
-            # Note: load_dataset_chunk now returns a Dataset object, so we handle the initial dict carefully
-            additional_ds, dataset_idx = load_dataset_chunk(
-                env, dataset_paths, dataset_idx, FLAGS.files_per_load - 1
-            )
-            
-            # Merge the initial dict with the additional Dataset
-            merged_data = {}
-            for k in train_dataset_dict:
-                # additional_ds is already a Dataset, so we access its properties (which behave like dict/array)
-                merged_data[k] = np.concatenate([train_dataset_dict[k], additional_ds[k]], axis=0)
-            
-            train_dataset = Dataset.create(**merged_data)
-        else:
-            train_dataset = Dataset.create(**train_dataset_dict)
-            
     else:
-        env, eval_env, train_dataset_dict, val_dataset = make_env_and_datasets(FLAGS.env_name)
-        train_dataset_dict = apply_dataset_processing_to_dict(train_dataset_dict)
-        train_dataset = Dataset.create(**train_dataset_dict)
+        env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
 
+    # house keeping
+    random.seed(FLAGS.seed)
+    np.random.seed(FLAGS.seed)
+
+    online_rng, rng = jax.random.split(jax.random.PRNGKey(FLAGS.seed), 2)
+    
+    config = FLAGS.agent
+    discount = FLAGS.agent.discount
+    config["horizon_length"] = FLAGS.horizon_length
+
+    # handle dataset
+    def process_train_dataset(ds):
+        """
+        Process the train dataset to 
+            - handle dataset proportion
+            - handle sparse reward
+            - convert to action chunked dataset
+        """
+
+        ds = Dataset.create(**ds)
+        if FLAGS.dataset_proportion < 1.0:
+            new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
+            ds = Dataset.create(
+                **{k: v[:new_size] for k, v in ds.items()}
+            )
+        
+        if FLAGS.sparse:
+            # Create a new dataset with modified rewards instead of trying to modify the frozen one
+            sparse_rewards = (ds["rewards"] != 0.0) * -1.0
+            ds_dict = {k: v for k, v in ds.items()}
+            ds_dict["rewards"] = sparse_rewards
+            ds = Dataset.create(**ds_dict)
+
+        return ds
+    
+    train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(())
     
     agent_class = agents[config['agent_name']]
@@ -238,6 +184,7 @@ def main(_):
     )
 
     params = agent.network.params
+    # filter all target network
     params = {k: v for k, v in params.items() if "target" not in k}
 
     print(params.keys())
@@ -268,7 +215,7 @@ def main(_):
             load_step = int(load_step)
             agent = restore_agent(agent, restore_path=FLAGS.save_dir, restore_epoch=load_step)
             restore_csv_loggers(csv_loggers, FLAGS.save_dir)
-            if load_stage == "online": 
+            if load_stage == "online": # load buffer too
                 replay_buffer, env_state = restore_buffer_env_state(restore_path=FLAGS.save_dir)
             else:
                 replay_buffer, env_state = None, None
@@ -285,7 +232,7 @@ def main(_):
         replay_buffer = None
     
 
-    if not success: 
+    if not success: # if failed to load, start over
         print("failed to load prev run")
         os.makedirs(FLAGS.save_dir, exist_ok=True)
         flag_dict = get_flag_dict()
@@ -307,21 +254,20 @@ def main(_):
             print(f"restoring from offline step {start_step}")
         else:
             start_step = 1
-            
         for i in tqdm.tqdm(range(start_step, FLAGS.offline_steps + 1)):
             log_step = i
-            
-            load_interval = FLAGS.dataset_replace_interval * FLAGS.files_per_load
-            
-            if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % load_interval == 0:
-                print(f"Replacing dataset at step {i} (Interval: {load_interval})", flush=True)
-                # load_dataset_chunk now handles processing internally
-                train_dataset, dataset_idx = load_dataset_chunk(
-                    env, 
-                    dataset_paths, 
-                    dataset_idx, 
-                    FLAGS.files_per_load
+
+            if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
+                dataset_idx = (dataset_idx + 1) % len(dataset_paths)
+                print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
+                train_dataset, val_dataset = make_ogbench_env_and_datasets(
+                    FLAGS.env_name,
+                    dataset_path=dataset_paths[dataset_idx],
+                    compact_dataset=False,
+                    dataset_only=True,
+                    cur_env=env,
                 )
+                train_dataset = process_train_dataset(train_dataset)
 
             batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
             
@@ -333,8 +279,10 @@ def main(_):
             if i % FLAGS.log_interval == 0:
                 logger.log(offline_info, "offline_agent", step=log_step)
 
+            # eval
             if i == FLAGS.offline_steps or \
                 (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
+                # during eval, the action chunk is executed fully
                 eval_info, _, _ = evaluate(
                     agent=agent,
                     env=eval_env,
@@ -345,6 +293,7 @@ def main(_):
                 )
                 logger.log(eval_info, "eval", step=log_step)
                 
+            # saving
             if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
                 last_save_path = save_agent(agent, FLAGS.save_dir, log_step)
                 save_csv_loggers(csv_loggers, FLAGS.save_dir)
@@ -368,17 +317,21 @@ def main(_):
 
     # Online RL
     update_info = {}
+
     from collections import defaultdict
     data = defaultdict(list)
     online_init_time = time.time()
 
+
     if load_stage == "online" and load_step is not None and env_state is not None:
         start_step = load_step + 1
+
         if "action_queue" in env_state:
             action_queue = list(np.reshape(env_state.pop("action_queue"), (-1, action_dim)))
             print("restored action queue:", action_queue)
         else:
             action_queue = []
+
         ob, info = env.reset(options={"set_state": env_state})
         print(f"restoring from online step {start_step}")
     else:
@@ -390,30 +343,36 @@ def main(_):
         log_step = FLAGS.offline_steps + i
         online_rng, key = jax.random.split(online_rng)
 
-        load_interval = FLAGS.dataset_replace_interval * FLAGS.files_per_load
-        
-        if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % load_interval == 0:
-            print(f"Replacing dataset at online step {i} (Interval: {load_interval})", flush=True)
-            train_dataset, dataset_idx = load_dataset_chunk(
-                env, 
-                dataset_paths, 
-                dataset_idx, 
-                FLAGS.files_per_load
+
+        if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
+            dataset_idx = (dataset_idx + 1) % len(dataset_paths)
+            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
+            train_dataset, val_dataset = make_ogbench_env_and_datasets(
+                FLAGS.env_name,
+                dataset_path=dataset_paths[dataset_idx],
+                compact_dataset=False,
+                dataset_only=True,
+                cur_env=env,
             )
+            train_dataset = process_train_dataset(train_dataset)
+            size = train_dataset.size
             
             if FLAGS.balanced_sampling:
                 pass
             else:
-                copy_size = min(train_dataset.size, replay_buffer.size)
                 for k in train_dataset:
-                    replay_buffer[k][:copy_size] = train_dataset[k][:copy_size]
+                    replay_buffer[k][:size] = train_dataset[k][:]
+
         
+        # during online rl, the action chunk is executed fully
         if len(action_queue) == 0:
+
             if FLAGS.balanced_sampling and i < FLAGS.start_training:
                 action = np.random.rand(action_dim) * 2. - 1.
                 action = np.clip(action, -1., 1.)
             else:
                 action = agent.sample_actions(observations=ob, rng=key)
+
             action_chunk = np.array(action).reshape(-1, action_dim)
             for action in action_chunk:
                 action_queue.append(action)
@@ -431,10 +390,12 @@ def main(_):
             if "button_states" in state:
                 data["button_states"].append(np.copy(state["button_states"]))
         
+        # logging useful metrics from info dict
         env_info = {}
         for key, value in info.items():
             if key.startswith("distance"):
                 env_info[key] = value
+        # always log this at every step
         logger.log(env_info, "env", step=log_step)
 
         if FLAGS.sparse:
@@ -451,13 +412,15 @@ def main(_):
         )
         replay_buffer.add_transition(transition)
         
+        # done
         if done:
             ob, _ = env.reset()
-            action_queue = []
+            action_queue = []  # reset the action queue
         else:
             ob = next_ob
 
         if i >= FLAGS.start_training:
+
             if FLAGS.balanced_sampling:
                 dataset_batch = train_dataset.sample_sequence(config['batch_size'] // 2 * FLAGS.utd_ratio, 
                         sequence_length=FLAGS.horizon_length, discount=discount)
@@ -467,6 +430,7 @@ def main(_):
                 batch = {k: np.concatenate([
                     dataset_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + dataset_batch[k].shape[1:]), 
                     replay_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + replay_batch[k].shape[1:])], axis=1) for k in dataset_batch}
+                
             else:
                 batch = replay_buffer.sample_sequence(config['batch_size'] * FLAGS.utd_ratio, 
                             sequence_length=FLAGS.horizon_length, discount=discount)
@@ -495,6 +459,7 @@ def main(_):
             )
             logger.log(eval_info, "eval", step=log_step)
 
+        # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
             last_save_path = save_agent(agent, FLAGS.save_dir, log_step)
             save_buffer_env_state(replay_buffer, env, action_queue, FLAGS.save_dir)
@@ -505,6 +470,7 @@ def main(_):
             print("saved buffer:", i, replay_buffer.pointer, replay_buffer.size)
 
     end_time = time.time()
+
     for key, csv_logger in logger.csv_loggers.items():
         csv_logger.close()
 
@@ -522,6 +488,8 @@ def main(_):
 
     with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
         f.write(run.url)
+
+    # cleanup
 
     all_files = os.listdir(FLAGS.save_dir)
     for relative_path in all_files:
