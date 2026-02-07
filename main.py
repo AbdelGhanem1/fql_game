@@ -42,7 +42,7 @@ flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 config_flags.DEFINE_config_file('agent', 'agents/meam.py', lock_config=False)
 
 flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use")
-flags.DEFINE_integer('dataset_replace_interval', 10000, 'Dataset replace interval, used for large datasets because of memory constraints')
+flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval, used for large datasets because of memory constraints')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
