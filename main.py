@@ -1,4 +1,5 @@
 import glob, tqdm, wandb, os, json, random, time, jax
+import gc  # Added for memory management
 from absl import app, flags
 from ml_collections import config_flags
 from log_utils import setup_wandb, get_exp_name, get_flag_dict, CsvLogger
@@ -44,6 +45,8 @@ config_flags.DEFINE_config_file('agent', 'agents/meam.py', lock_config=False)
 flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use")
 flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval, used for large datasets because of memory constraints')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
+# --- NEW FLAG ---
+flags.DEFINE_integer('files_per_load', 50, 'Number of dataset files to load into RAM at once.') 
 
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
@@ -107,6 +110,54 @@ class LoggingHelper:
         self.csv_loggers[prefix].log(data, step=step)
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
+# --- Helper Function to Load Chunk ---
+def load_chunk_of_files(env_name, paths, cur_env=None):
+    """
+    Loads a list of npz files and concatenates them into a single dictionary.
+    """
+    print(f"Loading chunk of {len(paths)} files...", flush=True)
+    start_t = time.time()
+    datasets = []
+    
+    # FIX: Initialize these to None so they exist even if we skip the 'if' block
+    eval_env = None
+    val_dataset = None
+    
+    for i, path in enumerate(paths):
+        # We only need to create the env once if it's not provided
+        is_first = (cur_env is None) and (i == 0)
+        
+        if is_first:
+            # First load: Create envs and val_dataset
+            env, eval_env, ds, val_dataset = make_ogbench_env_and_datasets(
+                env_name,
+                dataset_path=path,
+                compact_dataset=False,
+            )
+            datasets.append(ds)
+            cur_env = env 
+        else:
+            # Subsequent loads: Load data only (using existing env)
+            ds, _ = make_ogbench_env_and_datasets(
+                env_name,
+                dataset_path=path,
+                compact_dataset=False,
+                dataset_only=True,
+                cur_env=cur_env,
+            )
+            datasets.append(ds)
+
+    # Concatenate all datasets
+    merged_ds = {}
+    if len(datasets) > 0:
+        keys = datasets[0].keys()
+        for k in keys:
+            merged_ds[k] = np.concatenate([d[k] for d in datasets], axis=0)
+    
+    print(f"Chunk load complete. Time: {time.time() - start_t:.2f}s", flush=True)
+    
+    return cur_env, eval_env, merged_ds, val_dataset
+
 def main(_):
     # Check for WANDB_NAME in environment, otherwise fall back to default logic
     exp_name = os.environ.get('WANDB_NAME') or get_exp_name(FLAGS)
@@ -124,16 +175,27 @@ def main(_):
         ]
 
         if FLAGS.dataset_proportion < 1.:
+            # Warning: Logic slightly ambiguous here with chunks, 
+            # but keeping original intent of reducing total file count available.
             num_datasets = len(dataset_paths)
             num_subset_datasets = max(1, int(num_datasets * FLAGS.dataset_proportion))
             print("actual data proportion:", num_subset_datasets / num_datasets)
             dataset_paths = dataset_paths[:num_subset_datasets]
 
-        env, eval_env, train_dataset, val_dataset = make_ogbench_env_and_datasets(
-            FLAGS.env_name,
-            dataset_path=dataset_paths[dataset_idx],
-            compact_dataset=False,
+        # --- Initial Chunk Load ---
+        # Calculate the initial batch of paths
+        batch_paths = []
+        for i in range(FLAGS.files_per_load):
+            batch_paths.append(dataset_paths[(dataset_idx + i) % len(dataset_paths)])
+        
+        # We need to capture the env from the first load
+        env, eval_env, train_dataset, val_dataset = load_chunk_of_files(
+            FLAGS.env_name, 
+            batch_paths, 
+            cur_env=None
         )
+        # --------------------------
+
     else:
         env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
 
@@ -157,9 +219,11 @@ def main(_):
         """
 
         ds = Dataset.create(**ds)
-        if FLAGS.dataset_proportion < 1.0:
-            new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
-            ds = Dataset.create(
+        # Note: dataset_proportion was already handled by file selection above for OGBench,
+        # but if this is non-OGBench or secondary filtering is needed:
+        if FLAGS.dataset_proportion < 1.0 and FLAGS.ogbench_dataset_dir is None: 
+             new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
+             ds = Dataset.create(
                 **{k: v[:new_size] for k, v in ds.items()}
             )
         
@@ -257,17 +321,37 @@ def main(_):
         for i in tqdm.tqdm(range(start_step, FLAGS.offline_steps + 1)):
             log_step = i
 
-            if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
-                dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-                print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
-                train_dataset, val_dataset = make_ogbench_env_and_datasets(
+            # --- MODIFIED SWAP LOGIC ---
+            # We swap when i hits a multiple of (interval * files_per_load)
+            swap_frequency = FLAGS.dataset_replace_interval * FLAGS.files_per_load
+            
+            if FLAGS.ogbench_dataset_dir is not None and \
+               FLAGS.dataset_replace_interval != 0 and \
+               i % swap_frequency == 0:
+                
+                # Advance the index by the chunk size
+                dataset_idx = (dataset_idx + FLAGS.files_per_load) % len(dataset_paths)
+                print(f"Using new dataset chunk starting at index: {dataset_idx}", flush=True)
+                
+                # 1. Clear old data to free RAM before loading new
+                del train_dataset
+                gc.collect()
+
+                # 2. Select next chunk of paths
+                batch_paths = []
+                for offset in range(FLAGS.files_per_load):
+                    batch_paths.append(dataset_paths[(dataset_idx + offset) % len(dataset_paths)])
+
+                # 3. Load and merge
+                _, _, raw_dataset, _ = load_chunk_of_files(
                     FLAGS.env_name,
-                    dataset_path=dataset_paths[dataset_idx],
-                    compact_dataset=False,
-                    dataset_only=True,
+                    batch_paths,
                     cur_env=env,
                 )
-                train_dataset = process_train_dataset(train_dataset)
+                
+                # 4. Process
+                train_dataset = process_train_dataset(raw_dataset)
+            # ---------------------------
 
             batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
             
@@ -343,25 +427,38 @@ def main(_):
         log_step = FLAGS.offline_steps + i
         online_rng, key = jax.random.split(online_rng)
 
+        # --- MODIFIED SWAP LOGIC (ONLINE) ---
+        swap_frequency = FLAGS.dataset_replace_interval * FLAGS.files_per_load
+        
+        if FLAGS.ogbench_dataset_dir is not None and \
+           FLAGS.dataset_replace_interval != 0 and \
+           i % swap_frequency == 0:
+            
+            dataset_idx = (dataset_idx + FLAGS.files_per_load) % len(dataset_paths)
+            print(f"Using new dataset chunk: {dataset_idx}", flush=True)
 
-        if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
-            dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
-            train_dataset, val_dataset = make_ogbench_env_and_datasets(
+            del train_dataset
+            gc.collect()
+
+            batch_paths = []
+            for offset in range(FLAGS.files_per_load):
+                batch_paths.append(dataset_paths[(dataset_idx + offset) % len(dataset_paths)])
+
+            _, _, raw_dataset, _ = load_chunk_of_files(
                 FLAGS.env_name,
-                dataset_path=dataset_paths[dataset_idx],
-                compact_dataset=False,
-                dataset_only=True,
+                batch_paths,
                 cur_env=env,
             )
-            train_dataset = process_train_dataset(train_dataset)
+            train_dataset = process_train_dataset(raw_dataset)
             size = train_dataset.size
             
             if FLAGS.balanced_sampling:
                 pass
             else:
+                # Update Replay Buffer with new data
                 for k in train_dataset:
                     replay_buffer[k][:size] = train_dataset[k][:]
+        # ------------------------------------
 
         
         # during online rl, the action chunk is executed fully
