@@ -119,23 +119,25 @@ def load_chunk_of_files(env_name, paths, cur_env=None):
     start_t = time.time()
     datasets = []
     
-    # We only need the env from the first file (or passed in)
-    # For subsequent files, we just want the data dict
+    # FIX: Initialize these to None so they exist even if we skip the 'if' block
+    eval_env = None
+    val_dataset = None
+    
     for i, path in enumerate(paths):
         # We only need to create the env once if it's not provided
         is_first = (cur_env is None) and (i == 0)
         
         if is_first:
+            # First load: Create envs and val_dataset
             env, eval_env, ds, val_dataset = make_ogbench_env_and_datasets(
                 env_name,
                 dataset_path=path,
                 compact_dataset=False,
             )
             datasets.append(ds)
-            # set cur_env for the next iterations in this loop so we don't recreate it
             cur_env = env 
         else:
-            # Load data only
+            # Subsequent loads: Load data only (using existing env)
             ds, _ = make_ogbench_env_and_datasets(
                 env_name,
                 dataset_path=path,
@@ -150,17 +152,11 @@ def load_chunk_of_files(env_name, paths, cur_env=None):
     if len(datasets) > 0:
         keys = datasets[0].keys()
         for k in keys:
-            # Efficient list concatenation
             merged_ds[k] = np.concatenate([d[k] for d in datasets], axis=0)
     
     print(f"Chunk load complete. Time: {time.time() - start_t:.2f}s", flush=True)
     
-    if cur_env is None:
-        # Should not happen if paths is not empty
-        return None, None, merged_ds, None
-        
     return cur_env, eval_env, merged_ds, val_dataset
-
 
 def main(_):
     # Check for WANDB_NAME in environment, otherwise fall back to default logic
