@@ -55,7 +55,7 @@ flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy
 flags.DEFINE_bool('save_last_checkpoint', False, "do not delete the last checkpoint")
 flags.DEFINE_bool('save_replay_buffer', False, "do not delete the replay buffer in the end")
 
-flags.DEFINE_bool('balanced_sampling', False, "sample half offline and online replay buffer")
+flags.DEFINE_bool('balanced_sampling', True, "sample half offline and online replay buffer")
 
 def save_csv_loggers(csv_loggers, save_dir):
     for prefix, csv_logger in csv_loggers.items():
