@@ -138,7 +138,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             #target_actor2 = self.network.select("target_actor_slow")
 
             h = 1 / flow_steps
-            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.95
+            t_eval = jnp.ones_like(xs[-1][..., 0:1]) * 0.99
 
             # Use your improved score computation
             score_est1 = self.compute_score_ot(target_actor1, obs, xs[-1], t_eval)
