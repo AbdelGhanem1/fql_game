@@ -1,5 +1,5 @@
 import glob, tqdm, wandb, os, json, random, time, jax
-import gc  # Added for memory management
+import gc
 from absl import app, flags
 from ml_collections import config_flags
 from log_utils import setup_wandb, get_exp_name, get_flag_dict, CsvLogger
@@ -43,10 +43,9 @@ flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 config_flags.DEFINE_config_file('agent', 'agents/meam.py', lock_config=False)
 
 flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use")
-flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval, used for large datasets because of memory constraints')
+flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval (steps per file).')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
-# --- NEW FLAG ---
-flags.DEFINE_integer('files_per_load', 100, 'Number of dataset files to load into RAM at once. Set to 100+ to load all.') 
+flags.DEFINE_integer('files_per_load', 10, 'Number of dataset files to load into RAM at once.') 
 
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
@@ -55,7 +54,7 @@ flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy
 flags.DEFINE_bool('save_last_checkpoint', False, "do not delete the last checkpoint")
 flags.DEFINE_bool('save_replay_buffer', False, "do not delete the replay buffer in the end")
 
-flags.DEFINE_bool('balanced_sampling', True, "sample half offline and online replay buffer")
+flags.DEFINE_bool('balanced_sampling', False, "sample half offline and online replay buffer")
 
 def save_csv_loggers(csv_loggers, save_dir):
     for prefix, csv_logger in csv_loggers.items():
@@ -67,7 +66,6 @@ def restore_csv_loggers(csv_loggers, save_dir):
             csv_logger.restore(os.path.join(save_dir, f"{prefix}_sv.csv"))
 
 def save_buffer_env_state(buffer, env, action_queue, save_dir):
-
     state = env.get_state()
     env_state = {}
     env_state["env_qpos"] = np.copy(state["qpos"])
@@ -87,7 +85,6 @@ def restore_buffer_env_state(restore_path):
     size = buffer_dict.pop("size")
 
     state = {}
-
     state["qpos"] = buffer_dict.pop("env_qpos")
     state["qvel"] = buffer_dict.pop("env_qvel")
 
@@ -110,16 +107,16 @@ class LoggingHelper:
         self.csv_loggers[prefix].log(data, step=step)
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
-# --- Helper Function to Load Chunk ---
+# --- MODIFIED: Return LIST of datasets instead of merged dict ---
 def load_chunk_of_files(env_name, paths, cur_env=None):
     """
-    Loads a list of npz files and concatenates them into a single dictionary.
+    Loads a list of npz files and returns them as a LIST of datasets.
     """
     print(f"Loading chunk of {len(paths)} files...", flush=True)
     start_t = time.time()
-    datasets = []
+    datasets_list = []
     
-    # Initialize defaults to prevent UnboundLocalError
+    # Initialize defaults
     eval_env = None
     val_dataset = None
     
@@ -133,8 +130,7 @@ def load_chunk_of_files(env_name, paths, cur_env=None):
                 dataset_path=path,
                 compact_dataset=False,
             )
-            datasets.append(ds)
-            # set cur_env for the next iterations in this loop
+            datasets_list.append(ds)
             cur_env = env 
         else:
             # Load data only
@@ -145,32 +141,44 @@ def load_chunk_of_files(env_name, paths, cur_env=None):
                 dataset_only=True,
                 cur_env=cur_env,
             )
-            datasets.append(ds)
+            datasets_list.append(ds)
 
-    # Concatenate all datasets
-    merged_ds = {}
-    if len(datasets) > 0:
-        keys = datasets[0].keys()
-        for k in keys:
-            merged_ds[k] = np.concatenate([d[k] for d in datasets], axis=0)
-    
-    print(f"Chunk load complete. Time: {time.time() - start_t:.2f}s", flush=True)
+    print(f"Chunk load complete. Loaded {len(datasets_list)} datasets. Time: {time.time() - start_t:.2f}s", flush=True)
         
-    return cur_env, eval_env, merged_ds, val_dataset
+    return cur_env, eval_env, datasets_list, val_dataset
 
 
 def main(_):
-    # Check for WANDB_NAME in environment, otherwise fall back to default logic
     exp_name = os.environ.get('WANDB_NAME') or get_exp_name(FLAGS)
     run = setup_wandb(project='qam-reproduce', group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     
-    # Initialize dataset_paths to empty to avoid UnboundLocalError in 'else' cases
     dataset_paths = []
+    
+    # --- HELPER: Process a SINGLE dataset ---
+    def process_train_dataset(ds):
+        """
+        Process a single dataset dictionary.
+        """
+        ds = Dataset.create(**ds)
+        if FLAGS.dataset_proportion < 1.0 and FLAGS.ogbench_dataset_dir is None: 
+             new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
+             ds = Dataset.create(
+                **{k: v[:new_size] for k, v in ds.items()}
+            )
+        
+        if FLAGS.sparse:
+            sparse_rewards = (ds["rewards"] != 0.0) * -1.0
+            ds_dict = {k: v for k, v in ds.items()}
+            ds_dict["rewards"] = sparse_rewards
+            ds = Dataset.create(**ds_dict)
+        return ds
+    # ----------------------------------------
 
     # data loading
+    train_datasets = [] # This will be a LIST of Dataset objects
+
     if FLAGS.ogbench_dataset_dir is not None:
-        # custom ogbench dataset
         assert FLAGS.dataset_replace_interval != 0
         dataset_idx = 0
         dataset_paths = [
@@ -185,24 +193,30 @@ def main(_):
 
         # --- Initial Chunk Load ---
         batch_paths = []
-        # Safely determine how many files to load (min of request vs available)
         files_to_load_now = min(FLAGS.files_per_load, len(dataset_paths))
         
         for i in range(files_to_load_now):
             batch_paths.append(dataset_paths[(dataset_idx + i) % len(dataset_paths)])
         
-        env, eval_env, train_dataset, val_dataset = load_chunk_of_files(
+        # Returns a LIST of raw dicts
+        env, eval_env, raw_datasets_list, val_dataset = load_chunk_of_files(
             FLAGS.env_name, 
             batch_paths, 
             cur_env=None
         )
+        
+        # Process them immediately into a list of Dataset objects
+        train_datasets = [process_train_dataset(ds) for ds in raw_datasets_list]
         
         if files_to_load_now >= len(dataset_paths):
             print(f"Loaded all {len(dataset_paths)} available files. Dataset swapping disabled.")
         # --------------------------
 
     else:
+        # Standard Single File Loading
         env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
+        # Wrap it in a list so the rest of the code works uniformly
+        train_datasets = [process_train_dataset(train_dataset)]
 
     # house keeping
     random.seed(FLAGS.seed)
@@ -214,35 +228,8 @@ def main(_):
     discount = FLAGS.agent.discount
     config["horizon_length"] = FLAGS.horizon_length
 
-    # handle dataset
-    def process_train_dataset(ds):
-        """
-        Process the train dataset to 
-            - handle dataset proportion
-            - handle sparse reward
-            - convert to action chunked dataset
-        """
-
-        ds = Dataset.create(**ds)
-        # Note: dataset_proportion was already handled by file selection above for OGBench,
-        # but if this is non-OGBench or secondary filtering is needed:
-        if FLAGS.dataset_proportion < 1.0 and FLAGS.ogbench_dataset_dir is None: 
-             new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
-             ds = Dataset.create(
-                **{k: v[:new_size] for k, v in ds.items()}
-            )
-        
-        if FLAGS.sparse:
-            # Create a new dataset with modified rewards instead of trying to modify the frozen one
-            sparse_rewards = (ds["rewards"] != 0.0) * -1.0
-            ds_dict = {k: v for k, v in ds.items()}
-            ds_dict["rewards"] = sparse_rewards
-            ds = Dataset.create(**ds_dict)
-
-        return ds
-    
-    train_dataset = process_train_dataset(train_dataset)
-    example_batch = train_dataset.sample(())
+    # Use the first loaded dataset for example batch and agent creation
+    example_batch = train_datasets[0].sample(())
     
     agent_class = agents[config['agent_name']]
     agent = agent_class.create(
@@ -272,10 +259,8 @@ def main(_):
     last_save_path = None
     if os.path.isdir(FLAGS.save_dir):
         print("trying to load from", FLAGS.save_dir)
-
         if os.path.exists(os.path.join(FLAGS.save_dir, 'token.tk')):
             exit()
-
         try:
             with open(os.path.join(FLAGS.save_dir, 'progress.tk'), 'r') as f:
                 progress = f.read()
@@ -284,7 +269,7 @@ def main(_):
             load_step = int(load_step)
             agent = restore_agent(agent, restore_path=FLAGS.save_dir, restore_epoch=load_step)
             restore_csv_loggers(csv_loggers, FLAGS.save_dir)
-            if load_stage == "online": # load buffer too
+            if load_stage == "online":
                 replay_buffer, env_state = restore_buffer_env_state(restore_path=FLAGS.save_dir)
             else:
                 replay_buffer, env_state = None, None
@@ -301,7 +286,7 @@ def main(_):
         replay_buffer = None
     
 
-    if not success: # if failed to load, start over
+    if not success: 
         print("failed to load prev run")
         os.makedirs(FLAGS.save_dir, exist_ok=True)
         flag_dict = get_flag_dict()
@@ -313,6 +298,15 @@ def main(_):
         wandb_logger=wandb,
     )
 
+    # ==========================================
+    # RE-SEED TO PREVENT DRIFT
+    # ==========================================
+    print(f"Re-seeding RNG to {FLAGS.seed} before training start...", flush=True)
+    random.seed(FLAGS.seed)
+    np.random.seed(FLAGS.seed)
+    online_rng, rng = jax.random.split(jax.random.PRNGKey(FLAGS.seed), 2)
+    # ==========================================
+
     # Offline RL
     offline_init_time = time.time()
     if load_stage is not None and load_stage == "online":
@@ -323,41 +317,57 @@ def main(_):
             print(f"restoring from offline step {start_step}")
         else:
             start_step = 1
+            
         for i in tqdm.tqdm(range(start_step, FLAGS.offline_steps + 1)):
             log_step = i
 
-            # --- SWAP LOGIC ---
-            # Condition 1: Must be a dataset directory (ogbench type)
-            # Condition 2: Swap interval must be set
-            # Condition 3: ONLY swap if we haven't loaded the full dataset (files_per_load < total_files)
+            # --- DATASET MANAGEMENT LOGIC ---
             if FLAGS.ogbench_dataset_dir is not None and \
-               FLAGS.dataset_replace_interval != 0 and \
-               FLAGS.files_per_load < len(dataset_paths):
+               FLAGS.dataset_replace_interval != 0:
                 
-                swap_frequency = FLAGS.dataset_replace_interval * FLAGS.files_per_load
+                # 1. Check if we need to load a NEW CHUNK of files from disk
+                #    This happens every (files_per_load * replace_interval) steps
+                chunk_swap_freq = FLAGS.dataset_replace_interval * FLAGS.files_per_load
                 
-                if i % swap_frequency == 0:
-                    
+                # Only swap chunks if we haven't loaded everything
+                if FLAGS.files_per_load < len(dataset_paths) and i % chunk_swap_freq == 0 and i > 0:
                     dataset_idx = (dataset_idx + FLAGS.files_per_load) % len(dataset_paths)
-                    print(f"Using new dataset chunk starting at index: {dataset_idx}", flush=True)
+                    print(f"Loading new chunk starting at index: {dataset_idx}", flush=True)
                     
-                    del train_dataset
+                    del train_datasets
                     gc.collect()
 
                     batch_paths = []
                     for offset in range(FLAGS.files_per_load):
                         batch_paths.append(dataset_paths[(dataset_idx + offset) % len(dataset_paths)])
 
-                    _, _, raw_dataset, _ = load_chunk_of_files(
+                    _, _, raw_datasets_list, _ = load_chunk_of_files(
                         FLAGS.env_name,
                         batch_paths,
                         cur_env=env,
                     )
-                    
-                    train_dataset = process_train_dataset(raw_dataset)
-            # ---------------------------
+                    train_datasets = [process_train_dataset(ds) for ds in raw_datasets_list]
 
-            batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
+                # 2. Select the ACTIVE dataset from the currently loaded chunk
+                #    We change the active file every 'replace_interval' (1000) steps.
+                #    If we have K files in memory, we cycle through 0 to K-1.
+                
+                # Which step are we at relative to the start of this chunk?
+                steps_within_chunk = i % chunk_swap_freq
+                
+                # Which file index (0 to K-1) corresponds to this step?
+                active_file_idx = steps_within_chunk // FLAGS.dataset_replace_interval
+                
+                # Safety clip (rare edge case on exact boundary)
+                active_file_idx = min(active_file_idx, len(train_datasets) - 1)
+                
+                current_train_dataset = train_datasets[active_file_idx]
+            else:
+                # Single file mode / non-OGBench
+                current_train_dataset = train_datasets[0]
+            # --------------------------------
+
+            batch = current_train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
             
             if config['agent_name'] == 'rebrac':
                 agent, offline_info = agent.update(batch, full_update=(i % config['actor_freq'] == 0))
@@ -370,7 +380,6 @@ def main(_):
             # eval
             if i == FLAGS.offline_steps or \
                 (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
-                # during eval, the action chunk is executed fully
                 eval_info, _, _ = evaluate(
                     agent=agent,
                     env=eval_env,
@@ -391,12 +400,16 @@ def main(_):
 
     # transition from offline to online
     if replay_buffer is None:
-        print(train_dataset.keys())
-        print(train_dataset["observations"].shape)
+        # Use the LAST used dataset to initialize buffer structure, or first one
+        # Note: If balanced_sampling=False, we initialize buffer with CURRENT dataset only
+        #       This matches original behavior (buffer has 1 file).
+        ref_dataset = train_datasets[0] 
+        print(ref_dataset.keys())
+        print(ref_dataset["observations"].shape)
 
         if not FLAGS.balanced_sampling:
             replay_buffer = ReplayBuffer.create_from_initial_dataset(
-                dict(train_dataset), size=train_dataset.size + FLAGS.online_steps
+                dict(ref_dataset), size=ref_dataset.size + FLAGS.online_steps
             )
         else:
             replay_buffer = ReplayBuffer.create(example_batch, size=FLAGS.online_steps)
@@ -405,21 +418,17 @@ def main(_):
 
     # Online RL
     update_info = {}
-
     from collections import defaultdict
     data = defaultdict(list)
     online_init_time = time.time()
 
-
     if load_stage == "online" and load_step is not None and env_state is not None:
         start_step = load_step + 1
-
         if "action_queue" in env_state:
             action_queue = list(np.reshape(env_state.pop("action_queue"), (-1, action_dim)))
             print("restored action queue:", action_queue)
         else:
             action_queue = []
-
         ob, info = env.reset(options={"set_state": env_state})
         print(f"restoring from online step {start_step}")
     else:
@@ -431,50 +440,64 @@ def main(_):
         log_step = FLAGS.offline_steps + i
         online_rng, key = jax.random.split(online_rng)
 
-        # --- ONLINE SWAP LOGIC ---
+        # --- ONLINE DATASET LOGIC (SAME AS OFFLINE) ---
         if FLAGS.ogbench_dataset_dir is not None and \
-           FLAGS.dataset_replace_interval != 0 and \
-           FLAGS.files_per_load < len(dataset_paths): # ONLY swap if we haven't loaded everything
+           FLAGS.dataset_replace_interval != 0:
             
-            swap_frequency = FLAGS.dataset_replace_interval * FLAGS.files_per_load
+            chunk_swap_freq = FLAGS.dataset_replace_interval * FLAGS.files_per_load
             
-            if i % swap_frequency == 0:
+            # 1. Disk Swap Logic
+            if FLAGS.files_per_load < len(dataset_paths) and i % chunk_swap_freq == 0 and i > 0:
                 dataset_idx = (dataset_idx + FLAGS.files_per_load) % len(dataset_paths)
                 print(f"Using new dataset chunk: {dataset_idx}", flush=True)
 
-                del train_dataset
+                del train_datasets
                 gc.collect()
 
                 batch_paths = []
                 for offset in range(FLAGS.files_per_load):
                     batch_paths.append(dataset_paths[(dataset_idx + offset) % len(dataset_paths)])
 
-                _, _, raw_dataset, _ = load_chunk_of_files(
+                _, _, raw_datasets_list, _ = load_chunk_of_files(
                     FLAGS.env_name,
                     batch_paths,
                     cur_env=env,
                 )
-                train_dataset = process_train_dataset(raw_dataset)
-                size = train_dataset.size
+                train_datasets = [process_train_dataset(ds) for ds in raw_datasets_list]
                 
-                if FLAGS.balanced_sampling:
-                    pass
-                else:
-                    # Update Replay Buffer with new data
-                    for k in train_dataset:
-                        replay_buffer[k][:size] = train_dataset[k][:]
-        # ------------------------------------
+                # If we just swapped from disk, we might also need to update the replay buffer
+                # if balanced_sampling is False (to mimic replacing the backing data)
+                if not FLAGS.balanced_sampling:
+                     # This is tricky in "sequential mode". 
+                     # Usually original code swaps buffer every 1000 steps.
+                     # We handle that below in step 2.
+                     pass
 
-        
+            # 2. RAM Select Logic
+            steps_within_chunk = i % chunk_swap_freq
+            active_file_idx = steps_within_chunk // FLAGS.dataset_replace_interval
+            active_file_idx = min(active_file_idx, len(train_datasets) - 1)
+            current_train_dataset = train_datasets[active_file_idx]
+
+            # 3. Buffer Update Logic (Mimic replacing buffer every 1000 steps)
+            if not FLAGS.balanced_sampling:
+                # We need to detect if we just switched FILES (every 1000 steps)
+                if i % FLAGS.dataset_replace_interval == 0:
+                    # Overwrite the static part of the buffer with the NEW current file
+                    size = current_train_dataset.size
+                    for k in current_train_dataset:
+                        replay_buffer[k][:size] = current_train_dataset[k][:]
+        else:
+             current_train_dataset = train_datasets[0]
+        # ----------------------------------------------
+
         # during online rl, the action chunk is executed fully
         if len(action_queue) == 0:
-
             if FLAGS.balanced_sampling and i < FLAGS.start_training:
                 action = np.random.rand(action_dim) * 2. - 1.
                 action = np.clip(action, -1., 1.)
             else:
                 action = agent.sample_actions(observations=ob, rng=key)
-
             action_chunk = np.array(action).reshape(-1, action_dim)
             for action in action_chunk:
                 action_queue.append(action)
@@ -492,12 +515,10 @@ def main(_):
             if "button_states" in state:
                 data["button_states"].append(np.copy(state["button_states"]))
         
-        # logging useful metrics from info dict
         env_info = {}
         for key, value in info.items():
             if key.startswith("distance"):
                 env_info[key] = value
-        # always log this at every step
         logger.log(env_info, "env", step=log_step)
 
         if FLAGS.sparse:
@@ -514,17 +535,16 @@ def main(_):
         )
         replay_buffer.add_transition(transition)
         
-        # done
         if done:
             ob, _ = env.reset()
-            action_queue = []  # reset the action queue
+            action_queue = [] 
         else:
             ob = next_ob
 
         if i >= FLAGS.start_training:
-
             if FLAGS.balanced_sampling:
-                dataset_batch = train_dataset.sample_sequence(config['batch_size'] // 2 * FLAGS.utd_ratio, 
+                # Sample from current sequential file + online buffer
+                dataset_batch = current_train_dataset.sample_sequence(config['batch_size'] // 2 * FLAGS.utd_ratio, 
                         sequence_length=FLAGS.horizon_length, discount=discount)
                 replay_batch = replay_buffer.sample_sequence(FLAGS.utd_ratio * config['batch_size'] // 2, 
                     sequence_length=FLAGS.horizon_length, discount=discount)
@@ -532,7 +552,6 @@ def main(_):
                 batch = {k: np.concatenate([
                     dataset_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + dataset_batch[k].shape[1:]), 
                     replay_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + replay_batch[k].shape[1:])], axis=1) for k in dataset_batch}
-                
             else:
                 batch = replay_buffer.sample_sequence(config['batch_size'] * FLAGS.utd_ratio, 
                             sequence_length=FLAGS.horizon_length, discount=discount)
@@ -561,15 +580,12 @@ def main(_):
             )
             logger.log(eval_info, "eval", step=log_step)
 
-        # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
             last_save_path = save_agent(agent, FLAGS.save_dir, log_step)
             save_buffer_env_state(replay_buffer, env, action_queue, FLAGS.save_dir)
             save_csv_loggers(csv_loggers, FLAGS.save_dir)
             with open(os.path.join(FLAGS.save_dir, 'progress.tk'), 'w') as f:
                 f.write(f"online,{i}")
-            print("saved action queue:", action_queue)
-            print("saved buffer:", i, replay_buffer.pointer, replay_buffer.size)
 
     end_time = time.time()
 
@@ -590,8 +606,6 @@ def main(_):
 
     with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
         f.write(run.url)
-
-    # cleanup
 
     all_files = os.listdir(FLAGS.save_dir)
     for relative_path in all_files:
