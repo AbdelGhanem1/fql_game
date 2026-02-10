@@ -107,7 +107,7 @@ class LoggingHelper:
         self.csv_loggers[prefix].log(data, step=step)
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
-# --- MODIFIED: Return LIST of datasets instead of merged dict ---
+# --- RETURN LIST OF DATASETS ---
 def load_chunk_of_files(env_name, paths, cur_env=None):
     """
     Loads a list of npz files and returns them as a LIST of datasets.
@@ -298,15 +298,6 @@ def main(_):
         wandb_logger=wandb,
     )
 
-    # ==========================================
-    # RE-SEED TO PREVENT DRIFT
-    # ==========================================
-    print(f"Re-seeding RNG to {FLAGS.seed} before training start...", flush=True)
-    random.seed(FLAGS.seed)
-    np.random.seed(FLAGS.seed)
-    online_rng, rng = jax.random.split(jax.random.PRNGKey(FLAGS.seed), 2)
-    # ==========================================
-
     # Offline RL
     offline_init_time = time.time()
     if load_stage is not None and load_stage == "online":
@@ -401,8 +392,6 @@ def main(_):
     # transition from offline to online
     if replay_buffer is None:
         # Use the LAST used dataset to initialize buffer structure, or first one
-        # Note: If balanced_sampling=False, we initialize buffer with CURRENT dataset only
-        #       This matches original behavior (buffer has 1 file).
         ref_dataset = train_datasets[0] 
         print(ref_dataset.keys())
         print(ref_dataset["observations"].shape)
@@ -465,14 +454,6 @@ def main(_):
                 )
                 train_datasets = [process_train_dataset(ds) for ds in raw_datasets_list]
                 
-                # If we just swapped from disk, we might also need to update the replay buffer
-                # if balanced_sampling is False (to mimic replacing the backing data)
-                if not FLAGS.balanced_sampling:
-                     # This is tricky in "sequential mode". 
-                     # Usually original code swaps buffer every 1000 steps.
-                     # We handle that below in step 2.
-                     pass
-
             # 2. RAM Select Logic
             steps_within_chunk = i % chunk_swap_freq
             active_file_idx = steps_within_chunk // FLAGS.dataset_replace_interval
@@ -482,6 +463,7 @@ def main(_):
             # 3. Buffer Update Logic (Mimic replacing buffer every 1000 steps)
             if not FLAGS.balanced_sampling:
                 # We need to detect if we just switched FILES (every 1000 steps)
+                # This could be a file swap within RAM, OR a chunk swap from disk
                 if i % FLAGS.dataset_replace_interval == 0:
                     # Overwrite the static part of the buffer with the NEW current file
                     size = current_train_dataset.size
@@ -543,7 +525,6 @@ def main(_):
 
         if i >= FLAGS.start_training:
             if FLAGS.balanced_sampling:
-                # Sample from current sequential file + online buffer
                 dataset_batch = current_train_dataset.sample_sequence(config['batch_size'] // 2 * FLAGS.utd_ratio, 
                         sequence_length=FLAGS.horizon_length, discount=discount)
                 replay_batch = replay_buffer.sample_sequence(FLAGS.utd_ratio * config['batch_size'] // 2, 
