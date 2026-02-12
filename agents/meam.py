@@ -397,7 +397,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # Uses TanhNormal internally if you want bounded, but scores are unbounded, so MLP is better.
         score_net_def_mlp = MLP(
             hidden_dims=tuple(list(config['score_net_hidden_dims']) + [full_action_dim]),
-            activate_final=False 
+            activate_final=False,
+            use_layer_norm=True 
         )
         
         network_info = dict(
