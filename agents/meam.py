@@ -115,7 +115,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             ratio_val = ratio.mean()
             damping_factor_val = damping_factor.mean()
 
-            total_grad = q_grad * self.config["inv_temp"] + (effective_alpha) * (score_est)
+            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha) * (score_est)
             
         else:
             total_grad = q_grad * self.config["inv_temp"]
@@ -187,31 +187,33 @@ class MEAMAgent(flax.struct.PyTreeNode):
         xs, adjs, ts, pre_adj_info = self.adj_matching(batch["observations"], adj_rng)
         
         # === [SCORE NET TRAINING (DSM)] ===
-        # We perform Denoising Score Matching on FRESHLY generated samples from the FAST actor.
+        # We perform Denoising Score Matching.
         if self.config["me_am_alpha"] > 0.0:
-            # 1. Generate fresh samples from the CURRENT (Fast) policy
-            # This ensures we estimate the score of p_current, not p_target.
-            # Using 'residual' check ensures we match the actual inference policy.
+            # 1. Decide which model to sample from (Fast/Current vs Slow/Target)
+            # based on score_mode config.
+            use_target_for_score = (self.config["score_mode"] == "slow")
             current_model_type = "slow,fast" if self.config["residual"] else "fast"
             
+            # 2. Generate samples
             flow_actions = self.compute_flow_actions(
                 batch["observations"], 
                 jax.random.normal(score_rng, (batch_size, action_dim)),
-                model=current_model_type
+                model=current_model_type,
+                use_target=use_target_for_score
             )
             
-            # 2. Perturb with Gaussian noise
+            # 3. Perturb with Gaussian noise
             sigma_score = self.config["score_sigma"]
             epsilon = jax.random.normal(score_rng, flow_actions.shape)
             perturbed_actions = flow_actions + sigma_score * epsilon
             
-            # 3. Predict noise/score
+            # 4. Predict noise/score
             # We predict the direction to clean data, which corresponds to the score.
             # For DSM: Target = -epsilon / sigma
             estimated_score = self.network.select('score_net')(batch["observations"], perturbed_actions, params=grad_params)
             target_score = -epsilon / sigma_score
             
-            # 4. MSE Loss
+            # 5. MSE Loss
             score_loss = jnp.mean(jnp.square(estimated_score - target_score))
             
             actor_loss += score_loss
@@ -282,6 +284,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
         agent.target_update(new_network, 'critic')
         agent.target_update(new_network, 'actor_slow')
+        # We must update target_actor_fast for 'slow' score mode to work
+        agent.target_update(new_network, 'actor_fast')
 
         return agent.replace(network=new_network, rng=new_rng), info
 
@@ -339,15 +343,17 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         return actions
 
-    @partial(jax.jit, static_argnames="model")
+    @partial(jax.jit, static_argnames=("model", "use_target"))
     def compute_flow_actions(
         self,
         observations,
         noises,
         model="slow",
+        use_target=False,
     ):
         actions = noises
-        networks = [self.network.select(f'actor_{m}') for m in model.split(",")]
+        prefix = "target_actor" if use_target else "actor"
+        networks = [self.network.select(f'{prefix}_{m}') for m in model.split(",")]
 
         for i in range(self.config['flow_steps']):
             t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
@@ -394,7 +400,6 @@ class MEAMAgent(flax.struct.PyTreeNode):
         
         # === SCORE NET DEFINITION ===
         # Standard MLP taking (obs, action) -> score_vector
-        # Uses TanhNormal internally if you want bounded, but scores are unbounded, so MLP is better.
         score_net_def_mlp = MLP(
             hidden_dims=tuple(list(config['score_net_hidden_dims']) + [full_action_dim]),
             activate_final=False,
@@ -446,6 +451,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
         params = network.params
         params['modules_target_critic'] = params['modules_critic']
         params['modules_target_actor_slow'] = params['modules_actor_slow']
+        # IMPORTANT: Initialize target_actor_fast with same weights as actor_fast
+        params['modules_target_actor_fast'] = params['modules_actor_fast']
 
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
@@ -470,6 +477,7 @@ def get_config():
             ## Score Net hyperparameters (NEW)
             score_net_hidden_dims=(512, 512, 512, 512), 
             score_sigma=0.1, # Noise level for DSM training
+            score_mode='slow', # 'slow' (target) or 'fast' (current) for score computation
             
             ## Q-chunking hyperparameters
             horizon_length=ml_collections.config_dict.placeholder(int), # Will be set
