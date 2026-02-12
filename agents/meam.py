@@ -115,7 +115,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             ratio_val = ratio.mean()
             damping_factor_val = damping_factor.mean()
 
-            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha) * (score_est)
+            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha) * (score_est)*damping_factor
             
         else:
             total_grad = q_grad * self.config["inv_temp"]
