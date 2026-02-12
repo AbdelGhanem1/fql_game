@@ -468,7 +468,7 @@ def get_config():
             value_layer_norm=True,
             
             ## Score Net hyperparameters (NEW)
-            score_net_hidden_dims=(256, 256), 
+            score_net_hidden_dims=(512, 512, 512, 512), 
             score_sigma=0.1, # Noise level for DSM training
             
             ## Q-chunking hyperparameters
