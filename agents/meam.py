@@ -87,6 +87,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         # q_grad = Gradient of Q w.r.t action (Direction of high Reward)
         q_grad = grad_fn(obs, xs[-1]) 
+        q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
+        q_grad_normalized = q_grad/q_grad_norm
         
         # === [STEP 2] Insert Alpha Scheduling Here ===
         current_step = self.network.step 
@@ -119,11 +121,12 @@ class MEAMAgent(flax.struct.PyTreeNode):
             score_norm_val = score_norm.mean()
             ratio_val = ratio.mean()
             damping_factor_val = damping_factor.mean()
+            score_normalized = score_est/score_norm
 
-            total_grad = q_grad * self.config["inv_temp"] - (effective_alpha) * (score_est)
+            total_grad = q_grad_normalized * self.config["inv_temp"] - (effective_alpha)* (score_normalized)
             
         else:
-            total_grad = q_grad * self.config["inv_temp"]
+            total_grad = q_grad_normalized * self.config["inv_temp"]
             
         # Adjoint state initialization (Standard QAM uses negative gradient of reward)
         adj = -total_grad
