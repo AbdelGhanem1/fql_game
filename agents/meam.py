@@ -20,45 +20,37 @@ from utils.networks import MLP, TanhNormal, LogParam
 # ==============================================================================
 
 class SpectralDense(nn.Module):
-    """Dense layer with Stateless Power Iteration (Fast & Memory-Free)."""
+    """Dense layer with Stateless Power Iteration (Fast, Deterministic, & Crash-Free)."""
     features: int
     use_bias: bool = True
     dtype: Any = jnp.float32
     kernel_init: Any = nn.initializers.lecun_normal()
     bias_init: Any = nn.initializers.zeros
-    n_power_iterations: int = 3  # 3 iterations is usually enough for convergence
+    n_power_iterations: int = 3
 
     @nn.compact
     def __call__(self, inputs):
-        # 1. Define the kernel (weights)
         kernel = self.param('kernel', self.kernel_init, 
                             (inputs.shape[-1], self.features))
         
-        # 2. Stateless Power Iteration
-        # We start with a random vector 'u' every time.
-        # Since we don't save it, we run a few iterations to converge.
-        rng = self.make_rng('params') # Use params rng for deterministic noise during init/jit
-        u = jax.random.normal(rng, (1, self.features))
+        # FIX: Use a hardcoded fixed seed. 
+        # This removes the need for 'make_rng', preventing the InvalidRngError.
+        # It is deterministic, stateless, and fast.
+        u = jax.random.normal(jax.random.PRNGKey(42), (1, self.features))
         
-        # Loop to estimate singular vector
-        # JAX will unroll this, making it very fast
+        # Fast Power Iteration loop (JAX unrolls this)
         for _ in range(self.n_power_iterations):
-            # v = u * W.T
             v = jnp.dot(u, kernel.T)
             v = v / (jnp.linalg.norm(v) + 1e-12)
             
-            # u = v * W
             u = jnp.dot(v, kernel)
             u = u / (jnp.linalg.norm(u) + 1e-12)
 
-        # 3. Compute Spectral Norm (sigma) approximation
-        # sigma = u * W * v.T
-        # Note: v is shape (1, input_dim), kernel is (input_dim, features), u is (1, features)
-        # We compute v * kernel first -> (1, features)
+        # Compute Sigma
         z = jnp.dot(v, kernel) 
         sigma = jnp.dot(z, u.T)[0, 0]
         
-        # 4. Normalize and Project
+        # Normalize
         kernel_sn = kernel / sigma
         y = jnp.dot(inputs, kernel_sn)
         
