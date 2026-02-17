@@ -472,7 +472,7 @@ def get_config():
         lr=3e-4, batch_size=256, actor_hidden_dims=(512, 512, 512, 512), actor_layer_norm=False, value_hidden_dims=(512, 512, 512, 512), value_layer_norm=True,
         
         # === SCORE NET ===
-        score_net_hidden_dims=(256, 256), score_sigma=0.05, 
+        score_net_hidden_dims=(256, 256), score_sigma=0.1, 
         score_mode='slow', # 'slow' (target slow) or 'fast' (target fast)
         
         horizon_length=ml_collections.config_dict.placeholder(int), action_chunking=False, num_qs=10, rho=0.5, discount=0.99, tau=0.005, flow_steps=10, best_of_n=1,
