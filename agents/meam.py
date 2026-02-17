@@ -2,7 +2,6 @@ import copy
 from typing import Any
 
 import flax
-import flax.linen as nn  # Added for Spectral Norm modules
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -14,72 +13,6 @@ from utils.networks import ActorVectorField, Value
 from functools import partial
 from typing import Any
 from utils.networks import MLP, TanhNormal, LogParam
-
-# ==============================================================================
-# SPECTRAL NORMALIZATION IMPLEMENTATION
-# ==============================================================================
-
-class SpectralDense(nn.Module):
-    """Dense layer with Stateless Power Iteration (Fast, Deterministic, & Crash-Free)."""
-    features: int
-    use_bias: bool = True
-    dtype: Any = jnp.float32
-    kernel_init: Any = nn.initializers.lecun_normal()
-    bias_init: Any = nn.initializers.zeros
-    n_power_iterations: int = 3
-
-    @nn.compact
-    def __call__(self, inputs):
-        kernel = self.param('kernel', self.kernel_init, 
-                            (inputs.shape[-1], self.features))
-        
-        # FIX: Use a hardcoded fixed seed. 
-        # This removes the need for 'make_rng', preventing the InvalidRngError.
-        # It is deterministic, stateless, and fast.
-        u = jax.random.normal(jax.random.PRNGKey(42), (1, self.features))
-        
-        # Fast Power Iteration loop (JAX unrolls this)
-        for _ in range(self.n_power_iterations):
-            v = jnp.dot(u, kernel.T)
-            v = v / (jnp.linalg.norm(v) + 1e-12)
-            
-            u = jnp.dot(v, kernel)
-            u = u / (jnp.linalg.norm(u) + 1e-12)
-
-        # Compute Sigma
-        z = jnp.dot(v, kernel) 
-        sigma = jnp.dot(z, u.T)[0, 0]
-        
-        # Normalize
-        kernel_sn = kernel / sigma
-        y = jnp.dot(inputs, kernel_sn)
-        
-        if self.use_bias:
-            bias = self.param('bias', self.bias_init, (self.features,))
-            y = y + bias
-            
-        return y
-class SpectralMLP(nn.Module):
-    """MLP where every Dense layer is replaced by SpectralDense."""
-    hidden_dims: tuple
-    activate_final: bool = False
-    use_layer_norm: bool = True
-
-    @nn.compact
-    def __call__(self, x, *args, **kwargs):
-        for i, size in enumerate(self.hidden_dims):
-            x = SpectralDense(features=size)(x)
-            
-            # Apply LayerNorm and Activation for all layers except potentially the last
-            if i + 1 < len(self.hidden_dims) or self.activate_final:
-                if self.use_layer_norm:
-                    x = nn.LayerNorm()(x)
-                x = nn.relu(x)
-        return x
-
-# ==============================================================================
-# AGENT CODE
-# ==============================================================================
 
 class MEAMAgent(flax.struct.PyTreeNode):
     """Q-learning with adjoint matching and S-MEME entropy maximization via ScoreNet."""
@@ -155,7 +88,24 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # q_grad = Gradient of Q w.r.t action (Direction of high Reward)
         q_grad = grad_fn(obs, xs[-1]) 
         q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
-        q_grad_normalized = q_grad/q_grad_norm
+        
+        # === 1. Soft Normalization ===
+        # Prevents noise explosion. If grad is 0.02, result is ~0.02.
+        # If grad is 3.0, result is ~0.75.
+        q_grad_normalized = q_grad / (q_grad_norm + 1.0)
+
+        # === 2. Apply High Temp (Boost) ===
+        # Use inv_temp from config (e.g. 50.0) as the Boost factor
+        raw_update = q_grad_normalized * 50.0#self.config["inv_temp"]
+        
+        # === 3. Apply Speed Limit (Clamp) ===
+        # Manually enforce the limit of 15.0 that works for Task 1 stability.
+        # This acts on the MAGNITUDE of the vector to preserve direction.
+        update_norm = jnp.linalg.norm(raw_update, axis=-1, keepdims=True) + 1e-6
+        scale_factor = jnp.minimum(1.0, 15.0 / update_norm)
+        
+        # Final safe update term from Q-function
+        final_q_term = raw_update * scale_factor
         
         # === [STEP 2] Insert Alpha Scheduling Here ===
         current_step = self.network.step 
@@ -172,9 +122,6 @@ class MEAMAgent(flax.struct.PyTreeNode):
             # S-MEME: Maximize Entropy => Move particles in direction -score
             # Gradient = \nabla Q - alpha * \nabla log p
             
-            # The ScoreNet has been trained to estimate the score of the TARGET distribution
-            # (either Target Slow or Target Fast, depending on config).
-            # We evaluate this score on the CURRENT generated samples (xs[-1]).
             score_est = self.network.select("score_net")(obs, xs[-1])
             
             # --- ADAPTIVE CLIPPING ---
@@ -190,10 +137,12 @@ class MEAMAgent(flax.struct.PyTreeNode):
             damping_factor_val = damping_factor.mean()
             score_normalized = score_est/score_norm
 
-            total_grad = q_grad_normalized * self.config["inv_temp"] - (effective_alpha)* (score_normalized)
+            # Combine the Safe Q-Term with the Score Term
+            total_grad = final_q_term - (effective_alpha) * (score_normalized)
             
         else:
-            total_grad = q_grad_normalized * self.config["inv_temp"]
+            # If no entropy regularization, just use the Safe Q-Term
+            total_grad = final_q_term
             
         # Adjoint state initialization (Standard QAM uses negative gradient of reward)
         adj = -total_grad
@@ -206,6 +155,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             "score_norm": score_norm_val,
             "ratio": ratio_val,
             "damping_factor": damping_factor_val,
+            "update_norm": update_norm.mean(), # Helpful to debug if we are hitting the 15.0 clamp
         }
         
         adjs = []
@@ -424,13 +374,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
         critic_def = Value(hidden_dims=config['value_hidden_dims'], layer_norm=config['value_layer_norm'], num_ensembles=config['num_qs'])
         actor_def = ActorVectorField(hidden_dims=config['actor_hidden_dims'], layer_norm=config['actor_layer_norm'], action_dim=full_action_dim)
         
-        # === SCORE NET WITH SPECTRAL NORMALIZATION ===
-        # Using SpectralMLP instead of MLP
-        score_net_def_mlp = SpectralMLP(
-            hidden_dims=tuple(list(config['score_net_hidden_dims']) + [full_action_dim]), 
-            activate_final=False, 
-            use_layer_norm=True
-        )
+        # === SCORE NET: Unbounded Output + LayerNorm ===
+        score_net_def_mlp = MLP(hidden_dims=tuple(list(config['score_net_hidden_dims']) + [full_action_dim]), activate_final=False, layer_norm=True)
         
         network_info = dict(
             critic=(critic_def, (ex_observations, full_actions)),
@@ -481,3 +426,4 @@ def get_config():
         edit_target_entropy=ml_collections.config_dict.placeholder(float), edit_target_entropy_multiplier=0.5,
     ))
     return config
+
