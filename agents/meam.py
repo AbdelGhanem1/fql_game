@@ -20,7 +20,7 @@ from utils.networks import MLP, TanhNormal, LogParam
 # ==============================================================================
 
 class SpectralDense(nn.Module):
-    """Dense layer with Spectral Normalization."""
+    """Dense layer with Stateless Spectral Normalization (Exact SVD)."""
     features: int
     use_bias: bool = True
     dtype: Any = jnp.float32
@@ -33,35 +33,16 @@ class SpectralDense(nn.Module):
         kernel = self.param('kernel', self.kernel_init, 
                             (inputs.shape[-1], self.features))
         
-        # 2. Define non-trainable variables u and v for power iteration
-        #    We store them in 'batch_stats' so they persist but aren't optimized by Adam
-        u = self.variable('batch_stats', 'u', 
-                          lambda: jax.random.normal(self.make_rng('params'), (1, self.features)))
-        v = self.variable('batch_stats', 'v', 
-                          lambda: jax.random.normal(self.make_rng('params'), (1, inputs.shape[-1])))
+        # 2. Compute Exact Spectral Norm using SVD
+        #    This is stateless (no 'u' or 'v' variables needed)
+        #    We use compute_uv=False because we only need the singular values
+        s = jnp.linalg.svd(kernel, compute_uv=False)
+        sigma = s[0] + 1e-12 # Max singular value + epsilon for stability
         
-        # 3. Power Iteration (1 step is usually sufficient)
-        # v_new = kernel^T * u
-        v_new = jnp.dot(u.value, kernel.T)
-        v_new = v_new / (jnp.linalg.norm(v_new) + 1e-12)
-        
-        # u_new = kernel * v_new
-        u_new = jnp.dot(v_new, kernel)
-        u_new = u_new / (jnp.linalg.norm(u_new) + 1e-12)
-        
-        # Update state variables
-        if not self.is_initializing():
-             u.value = u_new
-             v.value = v_new
-
-        # 4. Compute Spectral Norm (sigma)
-        # sigma = u^T * W * v
-        sigma = jnp.dot(jnp.dot(v_new, kernel), u_new.T)[0, 0]
-        
-        # 5. Normalize kernel
+        # 3. Normalize kernel
         kernel_sn = kernel / sigma
 
-        # 6. Linear projection
+        # 4. Linear projection
         y = jnp.dot(inputs, kernel_sn)
         
         if self.use_bias:
@@ -69,7 +50,6 @@ class SpectralDense(nn.Module):
             y = y + bias
             
         return y
-
 class SpectralMLP(nn.Module):
     """MLP where every Dense layer is replaced by SpectralDense."""
     hidden_dims: tuple
