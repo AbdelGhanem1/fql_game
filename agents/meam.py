@@ -2,6 +2,7 @@ import copy
 from typing import Any
 
 import flax
+import flax.linen as nn  # Added for Spectral Norm modules
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -13,6 +14,83 @@ from utils.networks import ActorVectorField, Value
 from functools import partial
 from typing import Any
 from utils.networks import MLP, TanhNormal, LogParam
+
+# ==============================================================================
+# SPECTRAL NORMALIZATION IMPLEMENTATION
+# ==============================================================================
+
+class SpectralDense(nn.Module):
+    """Dense layer with Spectral Normalization."""
+    features: int
+    use_bias: bool = True
+    dtype: Any = jnp.float32
+    kernel_init: Any = nn.initializers.lecun_normal()
+    bias_init: Any = nn.initializers.zeros
+
+    @nn.compact
+    def __call__(self, inputs):
+        # 1. Define the kernel (weights)
+        kernel = self.param('kernel', self.kernel_init, 
+                            (inputs.shape[-1], self.features))
+        
+        # 2. Define non-trainable variables u and v for power iteration
+        #    We store them in 'batch_stats' so they persist but aren't optimized by Adam
+        u = self.variable('batch_stats', 'u', 
+                          lambda: jax.random.normal(self.make_rng('params'), (1, self.features)))
+        v = self.variable('batch_stats', 'v', 
+                          lambda: jax.random.normal(self.make_rng('params'), (1, inputs.shape[-1])))
+        
+        # 3. Power Iteration (1 step is usually sufficient)
+        # v_new = kernel^T * u
+        v_new = jnp.dot(u.value, kernel.T)
+        v_new = v_new / (jnp.linalg.norm(v_new) + 1e-12)
+        
+        # u_new = kernel * v_new
+        u_new = jnp.dot(v_new, kernel)
+        u_new = u_new / (jnp.linalg.norm(u_new) + 1e-12)
+        
+        # Update state variables
+        if not self.is_initializing():
+             u.value = u_new
+             v.value = v_new
+
+        # 4. Compute Spectral Norm (sigma)
+        # sigma = u^T * W * v
+        sigma = jnp.dot(jnp.dot(v_new, kernel), u_new.T)[0, 0]
+        
+        # 5. Normalize kernel
+        kernel_sn = kernel / sigma
+
+        # 6. Linear projection
+        y = jnp.dot(inputs, kernel_sn)
+        
+        if self.use_bias:
+            bias = self.param('bias', self.bias_init, (self.features,))
+            y = y + bias
+            
+        return y
+
+class SpectralMLP(nn.Module):
+    """MLP where every Dense layer is replaced by SpectralDense."""
+    hidden_dims: tuple
+    activate_final: bool = False
+    use_layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, x, *args, **kwargs):
+        for i, size in enumerate(self.hidden_dims):
+            x = SpectralDense(features=size)(x)
+            
+            # Apply LayerNorm and Activation for all layers except potentially the last
+            if i + 1 < len(self.hidden_dims) or self.activate_final:
+                if self.use_layer_norm:
+                    x = nn.LayerNorm()(x)
+                x = nn.relu(x)
+        return x
+
+# ==============================================================================
+# AGENT CODE
+# ==============================================================================
 
 class MEAMAgent(flax.struct.PyTreeNode):
     """Q-learning with adjoint matching and S-MEME entropy maximization via ScoreNet."""
@@ -357,8 +435,13 @@ class MEAMAgent(flax.struct.PyTreeNode):
         critic_def = Value(hidden_dims=config['value_hidden_dims'], layer_norm=config['value_layer_norm'], num_ensembles=config['num_qs'])
         actor_def = ActorVectorField(hidden_dims=config['actor_hidden_dims'], layer_norm=config['actor_layer_norm'], action_dim=full_action_dim)
         
-        # === SCORE NET: Unbounded Output + LayerNorm ===
-        score_net_def_mlp = MLP(hidden_dims=tuple(list(config['score_net_hidden_dims']) + [full_action_dim]), activate_final=False, layer_norm=True)
+        # === SCORE NET WITH SPECTRAL NORMALIZATION ===
+        # Using SpectralMLP instead of MLP
+        score_net_def_mlp = SpectralMLP(
+            hidden_dims=tuple(list(config['score_net_hidden_dims']) + [full_action_dim]), 
+            activate_final=False, 
+            use_layer_norm=True
+        )
         
         network_info = dict(
             critic=(critic_def, (ex_observations, full_actions)),
