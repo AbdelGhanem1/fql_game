@@ -188,7 +188,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
         random_actions = jax.random.uniform(mixture_rng, shape=batch_actions.shape, minval=-1.0, maxval=1.0)
         
         if self.config["mixture_prob"] > 0.0:
-            mixture_mask = jax.random.bernoulli(mixture_rng, p=self.config["mixture_prob"], shape=(batch_size, 1))
+            """ WARNING!!! USING HARDCODED VALUES """
+            mixture_mask = jax.random.bernoulli(mixture_rng, p=0.2, shape=(batch_size, 1))
             mixture_mask = mixture_mask.astype(jnp.float32)
             x_1 = (1.0 - mixture_mask) * batch_actions + mixture_mask * random_actions
         else:
