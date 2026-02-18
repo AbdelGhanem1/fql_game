@@ -96,7 +96,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         # === 2. Apply High Temp (Boost) ===
         # Use inv_temp from config (e.g. 50.0) as the Boost factor
-        raw_update = q_grad_normalized * 50.0#self.config["inv_temp"]
+        raw_update = q_grad_normalized * 100.0#self.config["inv_temp"]
         
         # === 3. Apply Speed Limit (Clamp) ===
         # Manually enforce the limit of 15.0 that works for Task 1 stability.
