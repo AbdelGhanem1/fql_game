@@ -11,7 +11,6 @@ from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 
 from functools import partial
-from typing import Any
 from utils.networks import MLP, TanhNormal, LogParam
 
 class MEAMAgent(flax.struct.PyTreeNode):
@@ -52,7 +51,10 @@ class MEAMAgent(flax.struct.PyTreeNode):
 
         action_dim = self.config['action_dim'] * \
                         (self.config['horizon_length'] if self.config["action_chunking"] else 1)
-        x = jax.random.normal(rng, shape=obs.shape[:-1] + (action_dim,))
+        
+        # [FIX 1] Split rng before generating initial state and integration loops
+        rng, x_rng, loop_rng = jax.random.split(rng, 3)
+        x = jax.random.normal(x_rng, shape=obs.shape[:-1] + (action_dim,))
 
         # For the trajectory integration (the "physics" of the update), we use the 
         # CURRENT actors because we need to differentiate through them to update them.
@@ -62,7 +64,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
         h = 1 / flow_steps
         xs = [x]
         ts = []
-        for i, key in zip(range(flow_steps), jax.random.split(rng, flow_steps)):
+        # [FIX 1 continued] Use loop_rng for the integration steps
+        for i, key in zip(range(flow_steps), jax.random.split(loop_rng, flow_steps)):
             t = i / flow_steps * jnp.ones_like(x[..., 0:1])
             sigma = jnp.sqrt(2 * (1 - t + h) / (t + h))
             noise = jax.random.normal(key, x.shape)
@@ -90,17 +93,12 @@ class MEAMAgent(flax.struct.PyTreeNode):
         q_grad_norm = jnp.linalg.norm(q_grad, axis=-1, keepdims=True) + 1e-6
         
         # === 1. Soft Normalization ===
-        # Prevents noise explosion. If grad is 0.02, result is ~0.02.
-        # If grad is 3.0, result is ~0.75.
         q_grad_normalized = q_grad / (q_grad_norm + 1.0)
 
         # === 2. Apply High Temp (Boost) ===
-        # Use inv_temp from config (e.g. 50.0) as the Boost factor
-        raw_update = q_grad_normalized * 100.0#self.config["inv_temp"]
+        raw_update = q_grad_normalized * self.config["inv_temp"]
         
         # === 3. Apply Speed Limit (Clamp) ===
-        # Manually enforce the limit of 15.0 that works for Task 1 stability.
-        # This acts on the MAGNITUDE of the vector to preserve direction.
         update_norm = jnp.linalg.norm(raw_update, axis=-1, keepdims=True) + 1e-6
         scale_factor = jnp.minimum(1.0, 15.0 / update_norm)
         
@@ -120,8 +118,6 @@ class MEAMAgent(flax.struct.PyTreeNode):
         # === [STEP 3] Apply Score with Effective Alpha ===
         if self.config["me_am_alpha"] > 0.:
             # S-MEME: Maximize Entropy => Move particles in direction -score
-            # Gradient = \nabla Q - alpha * \nabla log p
-            
             score_est = self.network.select("score_net")(obs, xs[-1])
             
             # --- ADAPTIVE CLIPPING ---
@@ -135,7 +131,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             score_norm_val = score_norm.mean()
             ratio_val = ratio.mean()
             damping_factor_val = damping_factor.mean()
-            score_normalized = score_est/score_norm
+            score_normalized = score_est/(score_norm + 1.0)
 
             # Combine the Safe Q-Term with the Score Term
             total_grad = final_q_term - (effective_alpha) * (score_normalized)
@@ -185,11 +181,12 @@ class MEAMAgent(flax.struct.PyTreeNode):
         x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
         
         # === [MIXTURE PRIOR IMPLEMENTATION] ===
-        random_actions = jax.random.uniform(mixture_rng, shape=batch_actions.shape, minval=-1.0, maxval=1.0)
+        # [FIX 2] Split mixture_rng for actions and the mask
+        mix_action_rng, mix_mask_rng = jax.random.split(mixture_rng)
+        random_actions = jax.random.uniform(mix_action_rng, shape=batch_actions.shape, minval=-1.0, maxval=1.0)
         
         if self.config["mixture_prob"] > 0.0:
-            """ WARNING!!! USING HARDCODED VALUES """
-            mixture_mask = jax.random.bernoulli(mixture_rng, p=0.2, shape=(batch_size, 1))
+            mixture_mask = jax.random.bernoulli(mix_mask_rng, p=self.config["mixture_prob"], shape=(batch_size, 1))
             mixture_mask = mixture_mask.astype(jnp.float32)
             x_1 = (1.0 - mixture_mask) * batch_actions + mixture_mask * random_actions
         else:
@@ -212,26 +209,25 @@ class MEAMAgent(flax.struct.PyTreeNode):
         
         # === [SCORE NET TRAINING (DSM)] ===
         if self.config["me_am_alpha"] > 0.0:
-            # Generate samples from the configured TARGET distribution
             if self.config["score_mode"] == "slow":
-                # Use Target Slow Actor (The Base/Prior)
                 model_for_score = "slow"
             else: 
-                # Use Target Fast Actor (The Current Policy, but stabilized)
-                # If residual, this implies target_slow + target_fast
                 model_for_score = "slow,fast" if self.config["residual"] else "fast"
+
+            # [FIX 3] Split score_rng into flow_rng and eps_rng to ensure independence
+            flow_rng, eps_rng = jax.random.split(score_rng)
 
             # ALWAYS use_target=True for score generation
             flow_actions = self.compute_flow_actions(
                 batch["observations"], 
-                jax.random.normal(score_rng, (batch_size, action_dim)),
+                jax.random.normal(flow_rng, (batch_size, action_dim)), # Use flow_rng
                 model=model_for_score,
                 use_target=True 
             )
             
             # DSM Training
             sigma_score = self.config["score_sigma"]
-            epsilon = jax.random.normal(score_rng, flow_actions.shape)
+            epsilon = jax.random.normal(eps_rng, flow_actions.shape) # Use eps_rng
             perturbed_actions = flow_actions + sigma_score * epsilon
             
             estimated_score = self.network.select('score_net')(batch["observations"], perturbed_actions, params=grad_params)
@@ -427,4 +423,3 @@ def get_config():
         edit_target_entropy=ml_collections.config_dict.placeholder(float), edit_target_entropy_multiplier=0.5,
     ))
     return config
-
