@@ -96,7 +96,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         q_grad_normalized = q_grad / (q_grad_norm + 1.0)
 
         # === 2. Apply High Temp (Boost) ===
-        raw_update = q_grad_normalized * self.config["inv_temp"]
+        raw_update = q_grad_normalized * 50.0
         
         # === 3. Apply Speed Limit (Clamp) ===
         update_norm = jnp.linalg.norm(raw_update, axis=-1, keepdims=True) + 1e-6
