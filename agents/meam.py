@@ -134,7 +134,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             score_normalized = score_est/(score_norm + 1.0)
 
             # Combine the Safe Q-Term with the Score Term
-            total_grad = final_q_term - (effective_alpha) * (score_normalized)
+            total_grad = final_q_term - 5.0* (score_normalized)
             
         else:
             # If no entropy regularization, just use the Safe Q-Term
@@ -186,7 +186,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         random_actions = jax.random.uniform(mix_action_rng, shape=batch_actions.shape, minval=-1.0, maxval=1.0)
         
         if self.config["mixture_prob"] > 0.0:
-            mixture_mask = jax.random.bernoulli(mix_mask_rng, p=0.2, shape=(batch_size, 1))
+            mixture_mask = jax.random.bernoulli(mix_mask_rng, p=0.3, shape=(batch_size, 1))
             mixture_mask = mixture_mask.astype(jnp.float32)
             x_1 = (1.0 - mixture_mask) * batch_actions + mixture_mask * random_actions
         else:
