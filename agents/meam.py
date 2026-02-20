@@ -96,11 +96,11 @@ class MEAMAgent(flax.struct.PyTreeNode):
         q_grad_normalized = q_grad / (q_grad_norm + 1.0)
 
         # === 2. Apply High Temp (Boost) ===
-        raw_update = q_grad_normalized * 50.0
+        raw_update = q_grad_normalized * self.config["inv_temp"]
         
         # === 3. Apply Speed Limit (Clamp) ===
         update_norm = jnp.linalg.norm(raw_update, axis=-1, keepdims=True) + 1e-6
-        scale_factor = jnp.minimum(1.0, 15.0 / update_norm)
+        scale_factor = jnp.minimum(1.0, self.config["inv_temp_clip_threshold"] / update_norm)
         
         # Final safe update term from Q-function
         final_q_term = raw_update * scale_factor
@@ -134,7 +134,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
             score_normalized = score_est/(score_norm + 1.0)
 
             # Combine the Safe Q-Term with the Score Term
-            total_grad = final_q_term - 5.0* (score_normalized)
+            total_grad = final_q_term - effective_alpha* (score_normalized)
             
         else:
             # If no entropy regularization, just use the Safe Q-Term
@@ -186,7 +186,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
         random_actions = jax.random.uniform(mix_action_rng, shape=batch_actions.shape, minval=-1.0, maxval=1.0)
         
         if self.config["mixture_prob"] > 0.0:
-            mixture_mask = jax.random.bernoulli(mix_mask_rng, p=0.3, shape=(batch_size, 1))
+            mixture_mask = jax.random.bernoulli(mix_mask_rng, p=self.config["mixture_prob"], shape=(batch_size, 1))
             mixture_mask = mixture_mask.astype(jnp.float32)
             x_1 = (1.0 - mixture_mask) * batch_actions + mixture_mask * random_actions
         else:
@@ -279,8 +279,8 @@ class MEAMAgent(flax.struct.PyTreeNode):
     def target_update(self, network, module_name):
         new_target_params = jax.tree_util.tree_map(
             lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
-            self.network.params[f'modules_{module_name}'],
-            self.network.params[f'modules_target_{module_name}'],
+            network.params[f'modules_{module_name}'],
+            network.params[f'modules_target_{module_name}'],
         )
         network.params[f'modules_target_{module_name}'] = new_target_params
 
@@ -415,7 +415,8 @@ def get_config():
         
         # === SCORE NET ===
         score_net_hidden_dims=(256, 256), score_sigma=0.1, 
-        score_mode='slow', # 'slow' (target slow) or 'fast' (target fast)
+        score_mode='fast', # 'slow' (target slow) or 'fast' (target fast)
+        inv_temp_clip_threshold=15.0,
         
         horizon_length=ml_collections.config_dict.placeholder(int), action_chunking=False, num_qs=10, rho=0.5, discount=0.99, tau=0.005, flow_steps=10, best_of_n=1,
         inv_temp=0.3, fql_alpha=0., edit_scale=0., me_am_alpha=1.0, mixture_prob=0.1,

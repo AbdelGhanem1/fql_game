@@ -66,7 +66,7 @@ def restore_csv_loggers(csv_loggers, save_dir):
 
 def save_buffer_env_state(buffer, env, action_queue, save_dir):
 
-    state = env.get_state()
+    state = env.unwrapped.get_state()
     env_state = {}
     env_state["env_qpos"] = np.copy(state["qpos"])
     env_state["env_qvel"] = np.copy(state["qvel"])
@@ -412,7 +412,7 @@ def main(_):
         done = terminated or truncated
 
         if FLAGS.save_all_online_states:
-            state = env.get_state()
+            state = env.unwrapped.get_state()
             data["steps"].append(i)
             data["obs"].append(np.copy(next_ob))
             data["qpos"].append(np.copy(state["qpos"]))
