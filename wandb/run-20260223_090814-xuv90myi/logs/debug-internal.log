@@ -1,0 +1,12 @@
+{"time":"2026-02-23T09:08:14.993320894Z","level":"INFO","msg":"stream: starting","core version":"0.25.0"}
+{"time":"2026-02-23T09:08:15.298277345Z","level":"INFO","msg":"stream: created new stream","id":"xuv90myi"}
+{"time":"2026-02-23T09:08:15.298324465Z","level":"INFO","msg":"handler: started","stream_id":"xuv90myi"}
+{"time":"2026-02-23T09:08:15.298510615Z","level":"INFO","msg":"stream: started","id":"xuv90myi"}
+{"time":"2026-02-23T09:08:15.298605765Z","level":"INFO","msg":"sender: started","stream_id":"xuv90myi"}
+{"time":"2026-02-23T09:08:15.298647485Z","level":"INFO","msg":"writer: started","stream_id":"xuv90myi"}
+{"time":"2026-02-23T09:28:13.978503519Z","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2026-02-23T09:28:14.424240178Z","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2026-02-23T09:28:14.426321868Z","level":"INFO","msg":"stream: closing","id":"xuv90myi"}
+{"time":"2026-02-23T09:28:14.426329228Z","level":"INFO","msg":"handler: closed","stream_id":"xuv90myi"}
+{"time":"2026-02-23T09:28:14.426370368Z","level":"INFO","msg":"sender: closed","stream_id":"xuv90myi"}
+{"time":"2026-02-23T09:28:14.426375158Z","level":"INFO","msg":"stream: closed","id":"xuv90myi"}

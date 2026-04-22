@@ -47,20 +47,7 @@ def evaluate(
     action_dim=None,
     extra_sample_kwargs={},
 ):
-    """Evaluate the agent in the environment.
-
-    Args:
-        agent: Agent.
-        env: Environment.
-        num_eval_episodes: Number of episodes to evaluate the agent.
-        num_video_episodes: Number of episodes to render. These episodes are not included in the statistics.
-        video_frame_skip: Number of frames to skip between renders.
-        eval_temperature: Action sampling temperature.
-        eval_gaussian: Standard deviation of the Gaussian noise to add to the actions.
-
-    Returns:
-        A tuple containing the statistics, trajectories, and rendered videos.
-    """
+    """Evaluate the agent in the environment."""
     actor_fn = supply_rng(partial(agent.sample_actions, **extra_sample_kwargs), rng=jax.random.PRNGKey(np.random.randint(0, 2**32)))
     trajs = []
     stats = defaultdict(list)
@@ -72,32 +59,25 @@ def evaluate(
 
         observation, info = env.reset()
             
-        observation_history = []
-        action_history = []
-        
         done = False
         step = 0
         render = []
-        action_chunk_lens = defaultdict(lambda: 0)
-
         action_queue = []
 
         gripper_contact_lengths = []
         gripper_contact_length = 0
+        
         while not done:
             
-            action = actor_fn(observations=observation)
-
+            # CRITICAL FIX: Only call the expensive MEAM neural network if the chunk queue is empty!
             if len(action_queue) == 0:
-                have_new_action = True
-                action = np.array(action).reshape(-1, action_dim)
-                action_chunk_len = action.shape[0]
-                for a in action:
+                action_chunk = actor_fn(observations=observation)
+                action_chunk = np.array(action_chunk).reshape(-1, action_dim)
+                for a in action_chunk:
                     action_queue.append(a)
-            else:
-                have_new_action = False
             
             action = action_queue.pop(0)
+            
             if eval_gaussian is not None:
                 action = np.random.normal(action, eval_gaussian)
 
@@ -106,8 +86,7 @@ def evaluate(
             step += 1
 
             if should_render and (step % video_frame_skip == 0 or done):
-                frame = env.render().copy()
-                render.append(frame)
+                render.append(env.render().copy())
 
             transition = dict(
                 observation=observation,
@@ -120,6 +99,8 @@ def evaluate(
             add_to(traj, transition)
             
             observation = next_observation
+            
+            # Gripper logging logic
             if "proprio" in info and "gripper_contact" in info["proprio"]:
                 gripper_contact = info["proprio"]["gripper_contact"]
             elif "gripper_contact" in info:
@@ -128,7 +109,7 @@ def evaluate(
                 gripper_contact = None
 
             if gripper_contact is not None:
-                if info["gripper_contact"] > 0.1:
+                if gripper_contact > 0.1: 
                     gripper_contact_length += 1
                 else:
                     if gripper_contact_length > 0:
@@ -157,4 +138,3 @@ def evaluate(
         stats[k] = np.mean(v)
 
     return stats, trajs, renders
-

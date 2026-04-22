@@ -1,5 +1,6 @@
 import glob, tqdm, wandb, os, json, random, time, jax
 import gc  # Kept for memory management
+import multiprocessing as mp
 from absl import app, flags
 from ml_collections import config_flags
 from log_utils import setup_wandb, get_exp_name, get_flag_dict, CsvLogger
@@ -50,7 +51,7 @@ flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
-flags.DEFINE_bool('save_last_checkpoint', False, "do not delete the last checkpoint")
+flags.DEFINE_bool('save_last_checkpoint', True, "do not delete the last checkpoint")
 flags.DEFINE_bool('save_replay_buffer', False, "do not delete the replay buffer in the end")
 
 flags.DEFINE_bool('balanced_sampling', True, "sample half offline and online replay buffer")
@@ -65,7 +66,6 @@ def restore_csv_loggers(csv_loggers, save_dir):
             csv_logger.restore(os.path.join(save_dir, f"{prefix}_sv.csv"))
 
 def save_buffer_env_state(buffer, env, action_queue, save_dir):
-
     state = env.unwrapped.get_state()
     env_state = {}
     env_state["env_qpos"] = np.copy(state["qpos"])
@@ -85,7 +85,6 @@ def restore_buffer_env_state(restore_path):
     size = buffer_dict.pop("size")
 
     state = {}
-
     state["qpos"] = buffer_dict.pop("env_qpos")
     state["qvel"] = buffer_dict.pop("env_qvel")
 
@@ -108,18 +107,107 @@ class LoggingHelper:
         self.csv_loggers[prefix].log(data, step=step)
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
+
+
+
+
+def background_worker(dataset_paths, env_name, start_idx, queue, sparse, dataset_proportion):
+    """Runs in a separate process and uses /dev/shm (RAM Disk) for instant transfers."""
+    from envs.ogbench_utils import make_ogbench_env_and_datasets
+    from utils.datasets import Dataset
+    import numpy as np
+    import os
+
+    bg_env, _, _, _ = make_ogbench_env_and_datasets(
+        env_name,
+        dataset_path=dataset_paths[0],
+        compact_dataset=False
+    )
+
+    idx = start_idx
+    while True:
+        if len(dataset_paths) == 0:
+            break
+            
+        idx_to_load = idx % len(dataset_paths)
+        ds_path = dataset_paths[idx_to_load]
+        
+        train_ds, _ = make_ogbench_env_and_datasets(
+            env_name,
+            dataset_path=ds_path,
+            compact_dataset=False,
+            dataset_only=True,
+            cur_env=bg_env,
+        )
+        
+        ds = Dataset.create(**train_ds)
+        
+        if dataset_proportion < 1.0: 
+             new_size = int(len(ds['masks']) * dataset_proportion)
+             ds = Dataset.create(**{k: v[:new_size] for k, v in ds.items()})
+        
+        if sparse:
+            sparse_rewards = (ds["rewards"] != 0.0) * -1.0
+            ds_dict = {k: v for k, v in ds.items()}
+            ds_dict["rewards"] = sparse_rewards
+            ds = Dataset.create(**ds_dict)
+            
+        pure_dict = {k: np.array(v) for k, v in ds.items()}
+        
+        # Write directly to the OS RAM Disk (/dev/shm)
+        shm_filename = f"/dev/shm/meam_worker_{os.getpid()}_ds_{idx_to_load}.npz"
+        np.savez(shm_filename, **pure_dict)
+        
+        # Pass ONLY the string filename through the IPC queue (instantaneous)
+        queue.put((idx_to_load, shm_filename))
+        idx += 1
+
+
+class AsyncDatasetLoader:
+    def __init__(self, dataset_paths, env_name, sparse, dataset_proportion, start_idx=1, max_queue_size=2):
+        self.dataset_paths = dataset_paths
+        
+        ctx = mp.get_context('spawn')
+        self.queue = ctx.Queue(maxsize=max_queue_size)
+        
+        self.process = ctx.Process(
+            target=background_worker, 
+            args=(dataset_paths, env_name, start_idx, self.queue, sparse, dataset_proportion),
+            daemon=True
+        )
+        self.process.start()
+
+    def fetch_next(self):
+        import os
+        import numpy as np
+        from utils.datasets import Dataset
+        
+        # Instantly receive the RAM disk filepath
+        idx, shm_filename = self.queue.get()
+        print(f"\n[IO] Swapped to background-loaded dataset: {self.dataset_paths[idx]}", flush=True)
+        
+        # Load from RAM disk and convert back to dictionary
+        loaded_data = np.load(shm_filename)
+        ds_dict = {k: loaded_data[k] for k in loaded_data.files}
+        
+        # Delete the file from RAM disk to free up memory
+        os.remove(shm_filename)
+        
+        return Dataset.create(**ds_dict)
+
+
+
 def main(_):
-    # Check for WANDB_NAME in environment, otherwise fall back to default logic
     exp_name = os.environ.get('WANDB_NAME') or get_exp_name(FLAGS)
-    run = setup_wandb(project='qam-reproduce', group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
+    project_name = os.environ.get('WANDB_PROJECT', 'qam-reproduce')
+    
+    run = setup_wandb(project=project_name, group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     
-    # Initialize dataset_paths to empty to avoid UnboundLocalError in 'else' cases
     dataset_paths = []
 
     # data loading
     if FLAGS.ogbench_dataset_dir is not None:
-        # custom ogbench dataset
         assert FLAGS.dataset_replace_interval != 0
         dataset_idx = 0
         dataset_paths = [
@@ -132,13 +220,12 @@ def main(_):
             print("actual data proportion:", num_subset_datasets / num_datasets)
             dataset_paths = dataset_paths[:num_subset_datasets]
 
-        # --- Reverted Logic: Load ONLY the first file initially ---
+        # Load ONLY the first file initially in the main thread
         env, eval_env, train_dataset, val_dataset = make_ogbench_env_and_datasets(
             FLAGS.env_name,
             dataset_path=dataset_paths[dataset_idx],
             compact_dataset=False,
         )
-        # --------------------------------------------------------
 
     else:
         env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
@@ -153,18 +240,10 @@ def main(_):
     discount = FLAGS.agent.discount
     config["horizon_length"] = FLAGS.horizon_length
 
-    # handle dataset
+    # handle dataset processing for the very first file loaded in main thread
     def process_train_dataset(ds):
-        """
-        Process the train dataset to 
-            - handle dataset proportion
-            - handle sparse reward
-            - convert to action chunked dataset
-        """
-
         ds = Dataset.create(**ds)
-        # Note: dataset_proportion was already handled by file selection above for OGBench,
-        # but if this is non-OGBench or secondary filtering is needed:
+        
         if FLAGS.dataset_proportion < 1.0 and FLAGS.ogbench_dataset_dir is None: 
              new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
              ds = Dataset.create(
@@ -172,7 +251,6 @@ def main(_):
             )
         
         if FLAGS.sparse:
-            # Create a new dataset with modified rewards instead of trying to modify the frozen one
             sparse_rewards = (ds["rewards"] != 0.0) * -1.0
             ds_dict = {k: v for k, v in ds.items()}
             ds_dict["rewards"] = sparse_rewards
@@ -182,6 +260,18 @@ def main(_):
     
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(())
+
+    # Initialize the Asynchronous Multiprocessing Loader
+    async_loader = None
+    if dataset_paths:
+        async_loader = AsyncDatasetLoader(
+            dataset_paths=dataset_paths,
+            env_name=FLAGS.env_name,
+            sparse=FLAGS.sparse,
+            dataset_proportion=FLAGS.dataset_proportion,
+            start_idx=1,
+            max_queue_size=2
+        )
     
     agent_class = agents[config['agent_name']]
     agent = agent_class.create(
@@ -240,7 +330,6 @@ def main(_):
         load_step = None
         replay_buffer = None
     
-
     if not success: # if failed to load, start over
         print("failed to load prev run")
         os.makedirs(FLAGS.save_dir, exist_ok=True)
@@ -266,27 +355,17 @@ def main(_):
         for i in tqdm.tqdm(range(start_step, FLAGS.offline_steps + 1)):
             log_step = i
 
-            # --- ORIGINAL SWAP LOGIC (Offline) ---
+            # ASYNC SWAP LOGIC (Offline)
             if FLAGS.ogbench_dataset_dir is not None and \
                FLAGS.dataset_replace_interval != 0 and \
                i % FLAGS.dataset_replace_interval == 0:
                 
-                dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-                print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
+                # Free old memory immediately
+                del train_dataset
+                gc.collect()
                 
-                # Load the SINGLE new file
-                train_dataset, val_dataset = make_ogbench_env_and_datasets(
-                    FLAGS.env_name,
-                    dataset_path=dataset_paths[dataset_idx],
-                    compact_dataset=False,
-                    dataset_only=True,
-                    cur_env=env,
-                )
-                
-                # Apply your custom processing
-                train_dataset = process_train_dataset(train_dataset)
-                gc.collect() # Helper cleanup
-            # ---------------------------
+                # Fetch pre-loaded dataset instantly
+                train_dataset = async_loader.fetch_next()
 
             batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
             
@@ -301,7 +380,6 @@ def main(_):
             # eval
             if i == FLAGS.offline_steps or \
                 (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
-                # during eval, the action chunk is executed fully
                 eval_info, _, _ = evaluate(
                     agent=agent,
                     env=eval_env,
@@ -336,11 +414,9 @@ def main(_):
 
     # Online RL
     update_info = {}
-
     from collections import defaultdict
     data = defaultdict(list)
     online_init_time = time.time()
-
 
     if load_stage == "online" and load_step is not None and env_state is not None:
         start_step = load_step + 1
@@ -362,37 +438,21 @@ def main(_):
         log_step = FLAGS.offline_steps + i
         online_rng, key = jax.random.split(online_rng)
 
-        # --- ORIGINAL SWAP LOGIC (Online) ---
+        # ASYNC SWAP LOGIC (Online)
         if FLAGS.ogbench_dataset_dir is not None and \
            FLAGS.dataset_replace_interval != 0 and \
            i % FLAGS.dataset_replace_interval == 0:
             
-            dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
+            del train_dataset
+            gc.collect()
             
-            # Load NEW single file
-            train_dataset, val_dataset = make_ogbench_env_and_datasets(
-                FLAGS.env_name,
-                dataset_path=dataset_paths[dataset_idx],
-                compact_dataset=False,
-                dataset_only=True,
-                cur_env=env,
-            )
-            # Apply your custom processing
-            train_dataset = process_train_dataset(train_dataset)
+            train_dataset = async_loader.fetch_next()
             size = train_dataset.size
             
-            # --- Logic from Original Main File ---
-            if FLAGS.balanced_sampling:
-                pass
-            else:
+            if not FLAGS.balanced_sampling:
                 # Overwrite buffer with new data
                 for k in train_dataset:
                     replay_buffer[k][:size] = train_dataset[k][:]
-            # -------------------------------------
-            gc.collect()
-        # ------------------------------------
-
         
         # during online rl, the action chunk is executed fully
         if len(action_queue) == 0:
@@ -520,13 +580,17 @@ def main(_):
         f.write(run.url)
 
     # cleanup
-
     all_files = os.listdir(FLAGS.save_dir)
+    
+    # Extract just the filename to safely match against os.listdir()
+    last_save_filename = os.path.basename(last_save_path) if last_save_path else None
+
     for relative_path in all_files:
         full_path = os.path.join(FLAGS.save_dir, relative_path)
         if os.path.isfile(full_path):
             if relative_path.startswith("params"):
-                if not FLAGS.save_last_checkpoint or relative_path != last_save_path:
+                # Compare filename to filename
+                if not FLAGS.save_last_checkpoint or relative_path != last_save_filename:
                     print(f"removing {full_path}")
                     os.remove(full_path)
             if relative_path == "buffer.npz" and not FLAGS.save_replay_buffer:

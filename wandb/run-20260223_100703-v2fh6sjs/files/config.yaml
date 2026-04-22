@@ -1,0 +1,212 @@
+'?':
+    value: false
+_wandb:
+    value:
+        cli_version: 0.25.0
+        e:
+            facvxq23xbvcx2wzad7t2ppup2scbotd:
+                args:
+                    - --run_group=puzzle-4x4_Workstation_Eval
+                    - --agent=agents/meam.py
+                    - --seed=40004
+                    - --env_name=puzzle-4x4-play-singletask-task3-v0
+                    - --ogbench_dataset_dir=/home/rdpuser/abdelghani_work/datasets/puzzle-4x4-100m
+                    - --sparse=True
+                    - --horizon_length=5
+                    - --eval_episodes=50
+                    - --save_dir=/home/rdpuser/abdelghani_work/fql_game/saved_models/job_7_task3_dims16_fast/qam-reproduce/puzzle-4x4_Workstation_Repro/puzzle-4x4-play-singletask-task3-v0/unorm_task3_tmp50.0_mprob0.2_fast_dims16_alpha0.0_seed40004
+                    - --agent.action_chunking=True
+                    - --agent.inv_temp=50.0
+                    - --agent.mixture_prob=0.2
+                    - --agent.me_am_alpha=0.0
+                    - --agent.num_qs=10
+                    - --agent.batch_size=256
+                    - --agent.score_mode=fast
+                    - --agent.score_net_hidden_dims=[16]
+                    - --agent.score_sigma=0.1
+                    - --agent.inv_temp_clip_threshold=25.0
+                codePath: eval_loop.py
+                codePathLocal: eval_loop.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "4030220222464"
+                        used: "984926322688"
+                email: ghanem96abdelghani@gmail.com
+                executable: /home/rdpuser/micromamba/envs/fql_env/bin/python
+                git:
+                    commit: 92c17375fc3cb09b8b03d13ce21ae985791af920
+                    remote: https://github.com/AbdelGhanem1/fql_game.git
+                gpu: NVIDIA GeForce RTX 5090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 21760
+                      memoryTotal: "34190917632"
+                      name: NVIDIA GeForce RTX 5090
+                      uuid: GPU-6e2f1bac-1b6d-f539-6d4a-40e4b67e72d5
+                host: robot-MS-7E47
+                memory:
+                    total: "66422820864"
+                os: Linux-6.17.0-14-generic-x86_64-with-glibc2.39
+                program: /home/rdpuser/abdelghani_work/fql_game/eval_loop.py
+                python: CPython 3.10.19
+                root: /home/rdpuser/abdelghani_work/fql_game
+                startedAt: "2026-02-23T10:07:03.898980Z"
+                writerId: facvxq23xbvcx2wzad7t2ppup2scbotd
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 12
+                - 45
+            "2":
+                - 12
+                - 45
+            "3":
+                - 2
+                - 13
+                - 15
+                - 16
+                - 61
+            "4": 3.10.19
+            "5": 0.25.0
+            "12": 0.25.0
+            "13": linux-x86_64
+agent:
+    value: |
+        action_chunking: true
+        action_dim: null
+        actor_hidden_dims: &id001 !!python/tuple
+        - 512
+        - 512
+        - 512
+        - 512
+        actor_layer_norm: false
+        agent_name: meam
+        batch_size: 256
+        best_of_n: 1
+        clip_adj: true
+        clip_grad: true
+        discount: 0.99
+        edit_scale: 0.0
+        edit_target_entropy: null
+        edit_target_entropy_multiplier: 0.5
+        flow_steps: 10
+        fql_alpha: 0.0
+        horizon_length: null
+        inv_temp: 50.0
+        inv_temp_clip_threshold: 25.0
+        lr: 0.0003
+        me_am_alpha: 0.0
+        mixture_prob: 0.2
+        num_qs: 10
+        ob_dims: null
+        residual: false
+        rho: 0.5
+        score_mode: fast
+        score_net_hidden_dims: !!python/tuple
+        - 16
+        score_sigma: 0.1
+        target_actor: true
+        tau: 0.005
+        use_target_grad: true
+        value_hidden_dims: *id001
+        value_layer_norm: true
+agent.action_chunking:
+    value: true
+agent.batch_size:
+    value: 256
+agent.inv_temp:
+    value: 50
+agent.inv_temp_clip_threshold:
+    value: 25
+agent.me_am_alpha:
+    value: 0
+agent.mixture_prob:
+    value: 0.2
+agent.num_qs:
+    value: 10
+agent.score_mode:
+    value: fast
+agent.score_net_hidden_dims:
+    value:
+        - 16
+agent.score_sigma:
+    value: 0.1
+alsologtostderr:
+    value: false
+chex_assert_multiple_cpu_devices:
+    value: false
+chex_n_cpu_devices:
+    value: 1
+chex_skip_pmap_variant_if_single_device:
+    value: true
+env_name:
+    value: puzzle-4x4-play-singletask-task3-v0
+eval_episodes:
+    value: 50
+help:
+    value: false
+helpfull:
+    value: false
+helpshort:
+    value: false
+helpxml:
+    value: false
+horizon_length:
+    value: 5
+log_dir:
+    value: ""
+logtostderr:
+    value: false
+ogbench_dataset_dir:
+    value: /home/rdpuser/abdelghani_work/datasets/puzzle-4x4-100m
+only_check_args:
+    value: false
+pdb:
+    value: false
+pdb_post_mortem:
+    value: false
+profile_file:
+    value: null
+run_group:
+    value: puzzle-4x4_Workstation_Eval
+run_with_pdb:
+    value: false
+run_with_profiling:
+    value: false
+save_dir:
+    value: /home/rdpuser/abdelghani_work/fql_game/saved_models/job_7_task3_dims16_fast/qam-reproduce/puzzle-4x4_Workstation_Repro/puzzle-4x4-play-singletask-task3-v0/unorm_task3_tmp50.0_mprob0.2_fast_dims16_alpha0.0_seed40004
+seed:
+    value: 40004
+showprefixforinfo:
+    value: true
+sparse:
+    value: true
+stderrthreshold:
+    value: fatal
+tags:
+    value: Eval
+test_random_seed:
+    value: 301
+test_randomize_ordering_seed:
+    value: ""
+test_srcdir:
+    value: ""
+test_tmpdir:
+    value: /tmp/absl_testing
+use_cprofile_for_profiling:
+    value: true
+v:
+    value: 0
+verbosity:
+    value: 0
+video_episodes:
+    value: 0
+video_frame_skip:
+    value: 3
+xml_output_file:
+    value: ""

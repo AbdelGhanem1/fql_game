@@ -1,0 +1,12 @@
+{"time":"2026-02-22T13:03:52.968271848Z","level":"INFO","msg":"stream: starting","core version":"0.25.0"}
+{"time":"2026-02-22T13:03:53.273204858Z","level":"INFO","msg":"stream: created new stream","id":"v86eb2dz"}
+{"time":"2026-02-22T13:03:53.273248158Z","level":"INFO","msg":"handler: started","stream_id":"v86eb2dz"}
+{"time":"2026-02-22T13:03:53.273333328Z","level":"INFO","msg":"stream: started","id":"v86eb2dz"}
+{"time":"2026-02-22T13:03:53.273343798Z","level":"INFO","msg":"sender: started","stream_id":"v86eb2dz"}
+{"time":"2026-02-22T13:03:53.273344328Z","level":"INFO","msg":"writer: started","stream_id":"v86eb2dz"}
+{"time":"2026-02-22T13:16:53.893844522Z","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2026-02-22T13:16:54.10858143Z","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2026-02-22T13:16:54.110574101Z","level":"INFO","msg":"stream: closing","id":"v86eb2dz"}
+{"time":"2026-02-22T13:16:54.110582471Z","level":"INFO","msg":"handler: closed","stream_id":"v86eb2dz"}
+{"time":"2026-02-22T13:16:54.110628401Z","level":"INFO","msg":"sender: closed","stream_id":"v86eb2dz"}
+{"time":"2026-02-22T13:16:54.110632961Z","level":"INFO","msg":"stream: closed","id":"v86eb2dz"}

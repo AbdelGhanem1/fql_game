@@ -341,3 +341,65 @@ class ActorVectorField(nn.Module):
         if self.action_dim == 1:
             v = v.squeeze(-1)
         return v
+        
+        
+        
+        
+class GeometricFourierFeatures(nn.Module):
+    """
+    Logarithmically spaced Fourier features for continuous noise levels.
+    """
+    output_size: int = 64
+    learnable: bool = False
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        if self.learnable:
+            w = self.param('kernel', nn.initializers.normal(0.2),
+                           (self.output_size // 2, x.shape[-1]), jnp.float32)
+            f = 2 * jnp.pi * x @ w.T
+        else:
+            half_dim = self.output_size // 2
+            
+            # Scale UP to high frequencies
+            emb = jnp.log(10000.0) / (half_dim - 1)
+            freqs = jnp.exp(emb * jnp.arange(half_dim))
+            
+            # Standard Score-SDE scaling
+            f = x * 2.0 * jnp.pi * freqs
+            
+        return jnp.concatenate([jnp.cos(f), jnp.sin(f)], axis=-1)
+        
+        
+
+class ConditionedScoreNet(nn.Module):
+    """Score network conditioned on continuous noise level (sigma).
+    
+    Attributes:
+        hidden_dims: Hidden layer dimensions (e.g., (512, 512, 512, 512)).
+        action_dim: Output dimension (same as action_dim).
+        layer_norm: Whether to apply layer normalization.
+        fourier_feature_dim: Dimension of the sigma fourier embedding.
+    """
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    fourier_feature_dim: int = 64
+
+    def setup(self):
+        # Dynamically unpack the hidden dims and append the final action_dim output layer
+        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+        
+        # USE THE NEW GEOMETRIC FOURIER FEATURES HERE
+        self.ff = GeometricFourierFeatures(self.fourier_feature_dim)
+
+    def __call__(self, observations, actions, sigmas):
+        # 1. Embed the continuous noise scalar into high-frequency features
+        sigma_emb = self.ff(sigmas)
+        
+        # 2. Concatenate the state, the noisy action, and the noise indicator
+        inputs = jnp.concatenate([observations, actions, sigma_emb], axis=-1)
+        
+        # 3. Predict the un-scaled score
+        score = self.mlp(inputs)
+        return score

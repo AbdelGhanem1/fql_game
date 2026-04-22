@@ -1,0 +1,86 @@
+2026-02-23 07:49:58,512 INFO    MainThread:1161272 [wandb_setup.py:_flush():81] Current SDK version is 0.25.0
+2026-02-23 07:49:58,512 INFO    MainThread:1161272 [wandb_setup.py:_flush():81] Configure stats pid to 1161272
+2026-02-23 07:49:58,512 INFO    MainThread:1161272 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-02-23 07:49:58,512 INFO    MainThread:1161272 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /home/rdpuser/abdelghani_work/fql_game/wandb/run-20260223_074958-lw8df9g2/logs/debug.log
+2026-02-23 07:49:58,513 INFO    MainThread:1161272 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /home/rdpuser/abdelghani_work/fql_game/wandb/run-20260223_074958-lw8df9g2/logs/debug-internal.log
+2026-02-23 07:49:58,513 INFO    MainThread:1161272 [wandb_init.py:init():844] calling init triggers
+2026-02-23 07:49:58,515 INFO    MainThread:1161272 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'?': False, 'agent': action_chunking: true
+action_dim: !!python/object:ml_collections.config_dict.config_dict.FieldReference
+  _field_type: &id001 !!python/name:builtins.int ''
+  _ops: []
+  _required: false
+  _value: null
+actor_hidden_dims: &id002 !!python/tuple
+- 512
+- 512
+- 512
+- 512
+actor_layer_norm: false
+agent_name: meam
+batch_size: 256
+best_of_n: 1
+clip_adj: true
+clip_grad: true
+discount: 0.99
+edit_scale: 0.0
+edit_target_entropy: !!python/object:ml_collections.config_dict.config_dict.FieldReference
+  _field_type: !!python/name:builtins.float ''
+  _ops: []
+  _required: false
+  _value: null
+edit_target_entropy_multiplier: 0.5
+flow_steps: 10
+fql_alpha: 0.0
+horizon_length: !!python/object:ml_collections.config_dict.config_dict.FieldReference
+  _field_type: *id001
+  _ops: []
+  _required: false
+  _value: null
+inv_temp: 50.0
+inv_temp_clip_threshold: 25.0
+lr: 0.0003
+me_am_alpha: 0.0
+mixture_prob: 0.2
+num_qs: 10
+ob_dims: !!python/object:ml_collections.config_dict.config_dict.FieldReference
+  _field_type: !!python/name:builtins.list ''
+  _ops: []
+  _required: false
+  _value: null
+residual: false
+rho: 0.5
+score_mode: fast
+score_net_hidden_dims: !!python/tuple
+- 16
+score_sigma: 0.1
+target_actor: true
+tau: 0.005
+use_target_grad: true
+value_hidden_dims: *id002
+value_layer_norm: true
+, 'agent.action_chunking': True, 'agent.batch_size': 256, 'agent.inv_temp': 50.0, 'agent.inv_temp_clip_threshold': 25.0, 'agent.me_am_alpha': 0.0, 'agent.mixture_prob': 0.2, 'agent.num_qs': 10, 'agent.score_mode': 'fast', 'agent.score_net_hidden_dims': [16], 'agent.score_sigma': 0.1, 'alsologtostderr': False, 'chex_assert_multiple_cpu_devices': False, 'chex_n_cpu_devices': 1, 'chex_skip_pmap_variant_if_single_device': True, 'env_name': 'puzzle-4x4-play-singletask-task5-v0', 'eval_episodes': 50, 'help': False, 'helpfull': False, 'helpshort': False, 'helpxml': False, 'horizon_length': 5, 'log_dir': '', 'logger_levels': {}, 'logtostderr': False, 'ogbench_dataset_dir': '/home/rdpuser/abdelghani_work/datasets/puzzle-4x4-100m', 'only_check_args': False, 'pdb': False, 'pdb_post_mortem': False, 'profile_file': None, 'run_group': 'puzzle-4x4_Workstation_Eval', 'run_with_pdb': False, 'run_with_profiling': False, 'save_dir': '/home/rdpuser/abdelghani_work/fql_game/saved_models/job_0_task5_dims16_fast/qam-reproduce/puzzle-4x4_Workstation_Repro/puzzle-4x4-play-singletask-task5-v0/unorm_task5_tmp50.0_mprob0.2_fast_dims16_alpha0.0_seed10001', 'seed': 10001, 'showprefixforinfo': True, 'sparse': True, 'stderrthreshold': 'fatal', 'tags': 'Eval', 'test_random_seed': 301, 'test_randomize_ordering_seed': '', 'test_srcdir': '', 'test_tmpdir': '/tmp/absl_testing', 'use_cprofile_for_profiling': True, 'v': 0, 'verbosity': 0, 'video_episodes': 0, 'video_frame_skip': 3, 'xml_output_file': '', '_wandb': {}}
+2026-02-23 07:49:58,515 INFO    MainThread:1161272 [wandb_init.py:init():892] starting backend
+2026-02-23 07:49:58,725 INFO    MainThread:1161272 [wandb_init.py:init():895] sending inform_init request
+2026-02-23 07:49:58,727 INFO    MainThread:1161272 [wandb_init.py:init():903] backend started and connected
+2026-02-23 07:49:58,729 INFO    MainThread:1161272 [wandb_init.py:init():973] updated telemetry
+2026-02-23 07:49:58,732 INFO    MainThread:1161272 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-02-23 07:49:59,306 WARNING MainThread:1161272 [wandb_init.py:init():1587] [no run ID] interrupted
+Traceback (most recent call last):
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/site-packages/wandb/sdk/wandb_init.py", line 1578, in init
+    run = wi.init(run_settings, run_config, run_printer)
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/site-packages/wandb/sdk/wandb_init.py", line 1008, in init
+    result = wait_with_progress(
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 24, in wait_with_progress
+    return wait_all_with_progress(
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 78, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/site-packages/wandb/sdk/lib/asyncio_manager.py", line 137, in run
+    return future.result()
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/concurrent/futures/_base.py", line 453, in result
+    self._condition.wait(timeout)
+  File "/home/rdpuser/micromamba/envs/fql_env/lib/python3.10/threading.py", line 320, in wait
+    waiter.acquire()
+KeyboardInterrupt
+2026-02-23 07:49:59,314 INFO    wandb-AsyncioManager-main:1161272 [service_client.py:_forward_responses():134] Reached EOF.
+2026-02-23 07:49:59,314 INFO    wandb-AsyncioManager-main:1161272 [mailbox.py:close():155] Closing mailbox, abandoning 1 handles.
