@@ -11,7 +11,7 @@ TASKS=(4 1)
 
 ALPHAS=(0.2)        # ME_AM_ALPHA
 TEMPS=(0.8)         # INV_TEMP
-TAU_SCORES=(0.001)    # TAU_SCORE
+TAU_SCORES=(0.001)  # TAU_SCORE
 
 TAU_CRITICS=(5.0 3.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
@@ -46,17 +46,13 @@ DISCOUNT=${DISCOUNTS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_A
 DIMS_TAG=$(echo $CURRENT_DIMS | tr -d '[],')
 
 echo "=========================================="
-echo "Docker/RunPod Job Index: $JOB_INDEX"
-# UPDATED: Echo statement reflects Humanoidmaze
+echo "Cloud-Hardened Job Index: $JOB_INDEX"
 echo "Config: Humanoidmaze-Large Task=$TASK_ID | Seed=$SEED | Mode=$SCORE_MODE | Dims=$DIMS_TAG"
-echo "Params: Gamma=$DISCOUNT | Alpha=$ME_AM_ALPHA | Temp=$INV_TEMP"
-echo "ME-AM Tuning: Mix=$MIXTURE_PROB | TauC=$TAU_CRITIC | TauS=$TAU_SCORE"
 echo "=========================================="
 
 # ==============================================================================
 # 2. DOCKER ENVIRONMENT SETUP
 # ==============================================================================
-# In Docker, micromamba is installed globally in /opt/conda
 CONDA_ENV="/opt/conda/envs/fql_env"
 SITE_PACKAGES="$CONDA_ENV/lib/python3.10/site-packages"
 PYTHON_EXEC="$CONDA_ENV/bin/python"
@@ -69,27 +65,31 @@ export JAX_DEFAULT_MATMUL_PRECISION=tensorfloat32
 export MUJOCO_GL="egl"
 export PYOPENGL_PLATFORM="egl"
 export JAX_ENABLE_X64=False
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # ==============================================================================
 # 3. PATHS & TRAINING
 # ==============================================================================
-PROJECT_DIR="/workspace/fql_game"
+PROJECT_DIR="/models/fql_game"
 
-# Matches the dataset path baked directly into the Docker v2 image
-DATASET_DIR="/dev/shm/humanoidmaze-large"
+# CLOUD ARMOR: Pointing to the physical RAM disk
+DATASET_DIR="/dev/shm/humanoidmaze-large" 
+
+# CLOUD ARMOR: Ensure the dataset is actually in RAM before starting
+if [ ! -d "$DATASET_DIR" ]; then
+    echo "Loading dataset into RAM disk..."
+    cp -r /workspace/datasets/humanoidmaze-large /dev/shm/
+fi
 
 cd "$PROJECT_DIR"
-
-# UPDATED: Create directories on the permanent 50GB Network Volume
 mkdir -p /models/logs /models/saved_models
 
 export WANDB_PROJECT="humanoidmaze-large_mirror_descent"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
-echo "🚀 Starting Training..."
+echo "🚀 Starting Cloud Training with NUMA Pinning..."
 
-"$PYTHON_EXEC" main.py \
+# CLOUD ARMOR: taskset -c 0-31 locks the CPU threads to Socket 0
+taskset -c 0-31 "$PYTHON_EXEC" main.py \
     --run_group=humanoidmaze-large_Docker_Repro \
     --agent=agents/meam.py \
     --seed=${SEED} \
