@@ -77,7 +77,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 PROJECT_DIR="/workspace/fql_game"
 
 # Matches the dataset path baked directly into the Docker v2 image
-DATASET_DIR="/workspace/datasets/humanoidmaze-large" 
+DATASET_DIR="/dev/shm/humanoidmaze-large"
 
 cd "$PROJECT_DIR"
 
