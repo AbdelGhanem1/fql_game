@@ -11,9 +11,9 @@ TASKS=(4 1)
 
 ALPHAS=(0.2)        # ME_AM_ALPHA
 TEMPS=(0.8)         # INV_TEMP
-TAU_SCORES=(0.1)    # TAU_SCORE
+TAU_SCORES=(0.001)    # TAU_SCORE
 
-TAU_CRITICS=(3.0 6.0)   
+TAU_CRITICS=(5.0 3.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
 DISCOUNTS=(0.995)   
 
@@ -47,13 +47,14 @@ DIMS_TAG=$(echo $CURRENT_DIMS | tr -d '[],')
 
 echo "=========================================="
 echo "Docker/RunPod Job Index: $JOB_INDEX"
-echo "Config: Antmaze-Giant Task=$TASK_ID | Seed=$SEED | Mode=$SCORE_MODE | Dims=$DIMS_TAG"
+# UPDATED: Echo statement reflects Humanoidmaze
+echo "Config: Humanoidmaze-Large Task=$TASK_ID | Seed=$SEED | Mode=$SCORE_MODE | Dims=$DIMS_TAG"
 echo "Params: Gamma=$DISCOUNT | Alpha=$ME_AM_ALPHA | Temp=$INV_TEMP"
 echo "ME-AM Tuning: Mix=$MIXTURE_PROB | TauC=$TAU_CRITIC | TauS=$TAU_SCORE"
 echo "=========================================="
 
 # ==============================================================================
-# 2. DOCKER ENVIRONMENT SETUP (UPDATED PATHS)
+# 2. DOCKER ENVIRONMENT SETUP
 # ==============================================================================
 # In Docker, micromamba is installed globally in /opt/conda
 CONDA_ENV="/opt/conda/envs/fql_env"
@@ -75,22 +76,23 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # ==============================================================================
 PROJECT_DIR="/workspace/fql_game"
 
-# UPDATE THIS: Ensure this exactly matches the folder structure on your local/RunPod volume
-DATASET_DIR="/workspace/datasets/antmaze-giant" 
+# UPDATED: Matches the dataset path from the download script
+DATASET_DIR="/workspace/datasets/humanoidmaze-large" 
 
 cd "$PROJECT_DIR"
 mkdir -p logs saved_models
 
-export WANDB_PROJECT="antmaze-giant_mirror_descent"
+# UPDATED: W&B project names
+export WANDB_PROJECT="humanoidmaze-large_mirror_descent"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
 echo "🚀 Starting Training..."
 
 "$PYTHON_EXEC" main.py \
-    --run_group=antmaze-giant_Docker_Repro \
+    --run_group=humanoidmaze-large_Docker_Repro \
     --agent=agents/meam.py \
     --seed=${SEED} \
-    --env_name=antmaze-giant-navigate-singletask-task${TASK_ID}-v0 \
+    --env_name=humanoidmaze-large-navigate-singletask-task${TASK_ID}-v0 \
     --ogbench_dataset_dir="${DATASET_DIR}" \
     --sparse=False \
     --horizon_length=5 \
@@ -103,13 +105,14 @@ echo "🚀 Starting Training..."
     --agent.tau_critic=${TAU_CRITIC} \
     --agent.tau_score=${TAU_SCORE} \
     --agent.num_qs=10 \
-    --agent.rho=0.5 \
+    --agent.rho=0.0 \
     --agent.batch_size=256 \
     --agent.score_mode=${SCORE_MODE} \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
-    --offline_steps=1000 \
-    --online_steps=0 \
-    --eval_interval=1000 \
+    --agent.score_sigma_min=1e-4 \
+    --offline_steps=1000000 \
+    --online_steps=500000 \
+    --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \
-    --save_dir="./saved_models/job_${JOB_INDEX}_antmaze_giant_task${TASK_ID}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_mix${MIXTURE_PROB}"
+    --save_dir="./saved_models/job_${JOB_INDEX}_humanoidmaze_large_task${TASK_ID}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_mix${MIXTURE_PROB}"
