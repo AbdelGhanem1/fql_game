@@ -11,6 +11,7 @@ def fast_urlretrieve(url, filename, reporthook=None, data=None):
     
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     
+    # STEALTH SETTINGS: 4 connections, 10M chunks, auto-resume
     cmd = [
         "aria2c", 
         "-x", "4", 
@@ -37,5 +38,5 @@ def fast_urlretrieve(url, filename, reporthook=None, data=None):
 urllib.request.urlretrieve = fast_urlretrieve
 
 print("Fetching metadata and starting download...")
-# Targeting the correct 'play' dataset for cube-double
-ogbench.download_datasets(['cube-double-play-v0'])
+# FIXED: Targeting 'humanoidmaze-large-navigate-v0' which pulls both train and val splits
+ogbench.download_datasets(['humanoidmaze-large-navigate-v0'])

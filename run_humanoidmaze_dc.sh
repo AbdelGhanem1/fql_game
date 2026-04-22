@@ -76,13 +76,14 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # ==============================================================================
 PROJECT_DIR="/workspace/fql_game"
 
-# UPDATED: Matches the dataset path from the download script
+# Matches the dataset path baked directly into the Docker v2 image
 DATASET_DIR="/workspace/datasets/humanoidmaze-large" 
 
 cd "$PROJECT_DIR"
-mkdir -p logs saved_models
 
-# UPDATED: W&B project names
+# UPDATED: Create directories on the permanent 50GB Network Volume
+mkdir -p /models/logs /models/saved_models
+
 export WANDB_PROJECT="humanoidmaze-large_mirror_descent"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
@@ -115,4 +116,4 @@ echo "🚀 Starting Training..."
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \
-    --save_dir="./saved_models/job_${JOB_INDEX}_humanoidmaze_large_task${TASK_ID}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_mix${MIXTURE_PROB}"
+    --save_dir="/models/saved_models/job_${JOB_INDEX}_humanoidmaze_large_task${TASK_ID}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_mix${MIXTURE_PROB}"
