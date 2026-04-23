@@ -39,4 +39,4 @@ urllib.request.urlretrieve = fast_urlretrieve
 
 print("Fetching metadata and starting download...")
 # FIXED: Targeting 'humanoidmaze-large-navigate-v0' which pulls both train and val splits
-ogbench.download_datasets(['humanoidmaze-large-navigate-v0'])
+ogbench.download_datasets(['cube-quadruple-v0'])

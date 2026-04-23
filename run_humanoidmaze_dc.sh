@@ -114,7 +114,7 @@ taskset -c 0-31 "$PYTHON_EXEC" main.py \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
     --agent.score_sigma_min=1e-4 \
     --offline_steps=1000000 \
-    --online_steps=500000 \
+    --online_steps=0 \
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \
