@@ -7,18 +7,18 @@ JOB_INDEX=${1:-0}
 # 1. PARAMETER SELECTION
 # ==============================================================================
 SEEDS=(40004 10001 20002 50005)
-ALPHAS=(0.0)
+ALPHAS=(0.5)
 
-TEMPS=(1.0)
+TEMPS=(0.5)
 TASKS=(4 1)
 SCORE_MODES=("fast")
 # Quoted strings to preserve brackets/commas
 HIDDEN_DIMS=("[512,512,512,512]")
 
-MIXTURES=(0.3)
+MIXTURES=(0.9)
 # NEW PARAMETERS
-TAU_CRITICS=(1.0)
-TAU_SCORES=(0.001)
+TAU_CRITICS=(0.1)
+TAU_SCORES=(0.1)
 
 NUM_SEEDS=${#SEEDS[@]}
 NUM_ALPHAS=${#ALPHAS[@]}
@@ -146,7 +146,7 @@ rm -f /dev/shm/meam_worker_*.npz
     --agent.tau_score=${TAU_SCORE} \
     --agent.num_qs=10 \
     --agent.rho=0.5 \
-    --agent.score_sigma_min=1e-4\
+    --agent.score_sigma_min=3e-4\
     --agent.batch_size=256 \
     --agent.score_mode=${SCORE_MODE} \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \

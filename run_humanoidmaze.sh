@@ -1,19 +1,19 @@
 #!/bin/bash
 
-# Usage: ./run_docker.sh [JOB_INDEX]
+# Usage: ./run_humanoid_workstation.sh [JOB_INDEX]
 JOB_INDEX=${1:-0}
 
 # ==============================================================================
 # 1. PARAMETER SELECTION
 # ==============================================================================
 SEEDS=(40004 10001 20002 50005)
-TASKS=(4 1)
+TASKS=(2 3 5)
 
 ALPHAS=(0.2)        # ME_AM_ALPHA
 TEMPS=(0.8)         # INV_TEMP
 TAU_SCORES=(0.001)  # TAU_SCORE
 
-TAU_CRITICS=(5.0 3.0)   
+TAU_CRITICS=(5.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
 DISCOUNTS=(0.995)   
 
@@ -46,16 +46,16 @@ DISCOUNT=${DISCOUNTS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_A
 DIMS_TAG=$(echo $CURRENT_DIMS | tr -d '[],')
 
 echo "=========================================="
-echo "Local Workstation Job Index: $JOB_INDEX"
+echo "Workstation Job Index: $JOB_INDEX"
 echo "Config: Humanoidmaze-Large Task=$TASK_ID | Seed=$SEED | Mode=$SCORE_MODE | Dims=$DIMS_TAG"
 echo "Params: Gamma=$DISCOUNT | Alpha=$ME_AM_ALPHA | Temp=$INV_TEMP"
 echo "ME-AM Tuning: Mix=$MIXTURE_PROB | TauC=$TAU_CRITIC | TauS=$TAU_SCORE"
 echo "=========================================="
 
 # ==============================================================================
-# 2. DOCKER ENVIRONMENT SETUP
+# 2. LOCAL WORKSTATION ENVIRONMENT SETUP
 # ==============================================================================
-CONDA_ENV="/opt/conda/envs/fql_env"
+CONDA_ENV="$HOME/micromamba/envs/fql_env"
 SITE_PACKAGES="$CONDA_ENV/lib/python3.10/site-packages"
 PYTHON_EXEC="$CONDA_ENV/bin/python"
 
@@ -67,27 +67,35 @@ export JAX_DEFAULT_MATMUL_PRECISION=tensorfloat32
 export MUJOCO_GL="egl"
 export PYOPENGL_PLATFORM="egl"
 export JAX_ENABLE_X64=False
-
-# Restored for local bare-metal performance
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # ==============================================================================
 # 3. PATHS & TRAINING
 # ==============================================================================
-PROJECT_DIR="/workspace/fql_game"
-DATASET_DIR="/workspace/datasets/humanoidmaze-large" 
+PROJECT_DIR="$(pwd)"
+
+# WORKSTATION ARMOR: Pointing to the physical RAM disk
+SOURCE_DATASET_DIR="$HOME/abdelghani_work/datasets/humanoidmaze-large"
+DATASET_DIR="/dev/shm/humanoidmaze-large" 
+
+# Ensure the dataset is actually in RAM before starting
+if [ ! -d "$DATASET_DIR" ]; then
+    echo "Loading dataset into RAM disk from $SOURCE_DATASET_DIR..."
+    cp -r "$SOURCE_DATASET_DIR" /dev/shm/
+fi
 
 cd "$PROJECT_DIR"
-
 mkdir -p logs saved_models
 
+export WANDB_MODE="offline"
 export WANDB_PROJECT="humanoidmaze-large_mirror_descent"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
-echo "🚀 Starting Local Baseline Training..."
+echo "🚀 Starting Workstation Training with NUMA Pinning..."
 
-"$PYTHON_EXEC" main.py \
-    --run_group=humanoidmaze-large_Local_Baseline \
+# CLOUD ARMOR: taskset -c 0-31 locks the CPU threads to Socket 0 (Adjust if < 32 cores local)
+taskset -c 0-31 "$PYTHON_EXEC" main.py \
+    --run_group=humanoidmaze-large_Workstation_Repro \
     --agent=agents/meam.py \
     --seed=${SEED} \
     --env_name=humanoidmaze-large-navigate-singletask-task${TASK_ID}-v0 \
@@ -109,7 +117,7 @@ echo "🚀 Starting Local Baseline Training..."
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
     --agent.score_sigma_min=1e-4 \
     --offline_steps=1000000 \
-    --online_steps=500000 \
+    --online_steps=0 \
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \
