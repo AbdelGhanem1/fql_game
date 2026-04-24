@@ -7,7 +7,7 @@ JOB_INDEX=${1:-0}
 # 1. PARAMETER SELECTION FOR CUBE-TRIPLE PROXY TUNING
 # ==============================================================================
 # Tasks 2 and 4 represent the domain difficulty (Proxy tuning method)
-TASKS=(4 2)
+TASKS=(1 5)
 SEEDS=(10001 20002 30003 40004)
 
 # --- THE PAIRED COMBINATIONS (Alpha + Temp = 1.0) ---
@@ -20,7 +20,7 @@ TEMPS=(0.8)
 MIXTURES=(0.0)
 
 # Since Denominator = 1, TAU_CRITIC acts directly. 3.0 matches QAM baseline exactly.
-TAU_CRITICS=(10.0)
+TAU_CRITICS=(3.0)
 
 # Slightly elevated from puzzle to encourage manifold exploration
 TAU_SCORES=(0.1)
@@ -131,8 +131,9 @@ echo "🚀 Starting Training..."
     --agent.use_gaussian_mode=False\
     --agent.score_sigma_min=3e-1\
     --offline_steps=1000000 \
-    --online_steps=100000 \
+    --online_steps=0 \
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000\
+    --save_last_checkpoint=True\
     --save_dir="./saved_models/cube_job_${JOB_INDEX}_tk${TASK_ID}_a${ME_AM_ALPHA}_tC${TAU_CRITIC}_tS${TAU_SCORE}"
