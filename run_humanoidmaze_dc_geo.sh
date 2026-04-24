@@ -7,13 +7,13 @@ JOB_INDEX=${1:-0}
 # 1. PARAMETER SELECTION
 # ==============================================================================
 SEEDS=(40004 10001 20002 50005)
-TASKS=(4 1 3 2 5)
+TASKS=(4 1)
 
 ALPHAS=(0.2)        # ME_AM_ALPHA
 TEMPS=(0.8)         # INV_TEMP
 TAU_SCORES=(0.001)  # TAU_SCORE
 
-TAU_CRITICS=(10.0)   
+TAU_CRITICS=(5.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
 DISCOUNTS=(0.995)   
 
