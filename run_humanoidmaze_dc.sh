@@ -13,7 +13,7 @@ ALPHAS=(0.2)        # ME_AM_ALPHA
 TEMPS=(0.8)         # INV_TEMP
 TAU_SCORES=(0.001)  # TAU_SCORE
 
-TAU_CRITICS=(5.0 3.0)   
+TAU_CRITICS=(10.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
 DISCOUNTS=(0.995)   
 
@@ -85,7 +85,7 @@ mkdir -p /models/logs /models/saved_models
 
 export WANDB_MODE="offline"
 
-export WANDB_PROJECT="humanoidmaze-large_mirror_descent"
+export WANDB_PROJECT="humanoidmaze-large_mirror_descent_10_sweep"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
 echo "🚀 Starting Cloud Training with NUMA Pinning..."
