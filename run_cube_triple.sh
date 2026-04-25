@@ -20,7 +20,7 @@ TEMPS=(0.7)
 MIXTURES=(0.0)
 
 
-TAU_CRITICS=(5.0)
+TAU_CRITICS=(1.0)
 
 # Slightly elevated from puzzle to encourage manifold exploration
 TAU_SCORES=(0.001)
