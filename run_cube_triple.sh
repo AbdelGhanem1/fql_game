@@ -14,8 +14,8 @@ SEEDS=(10001 20002 30003 40004)
 # We will use the same index to access both arrays so they stay locked together.
 # Pair 0: Alpha=0.1, Temp=0.9
 # Pair 1: Alpha=0.3, Temp=0.7
-ALPHAS=(0.2)
-TEMPS=(0.8)
+ALPHAS=(0.1)
+TEMPS=(0.9)
 
 MIXTURES=(0.0)
 
@@ -23,7 +23,7 @@ MIXTURES=(0.0)
 TAU_CRITICS=(3.0)
 
 # Slightly elevated from puzzle to encourage manifold exploration
-TAU_SCORES=(0.1)
+TAU_SCORES=(0.001)
 
 SCORE_MODES=("fast")
 HIDDEN_DIMS=("[512,512,512,512]")
@@ -129,7 +129,7 @@ echo "🚀 Starting Training..."
     --agent.score_mode=${SCORE_MODE} \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
     --agent.use_gaussian_mode=False\
-    --agent.score_sigma_min=3e-1\
+    --agent.score_sigma_min=1e-4\
     --offline_steps=1000000 \
     --online_steps=0 \
     --eval_interval=50000 \
