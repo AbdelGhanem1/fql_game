@@ -14,13 +14,13 @@ SEEDS=(10001 20002 30003 40004)
 # We will use the same index to access both arrays so they stay locked together.
 # Pair 0: Alpha=0.1, Temp=0.9
 # Pair 1: Alpha=0.3, Temp=0.7
-ALPHAS=(0.3)
-TEMPS=(0.7)
+ALPHAS=(0.4)
+TEMPS=(0.6)
 
 MIXTURES=(0.0)
 
 
-TAU_CRITICS=(1.0)
+TAU_CRITICS=(5.0)
 
 # Slightly elevated from puzzle to encourage manifold exploration
 TAU_SCORES=(0.001)
