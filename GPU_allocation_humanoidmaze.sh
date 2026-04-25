@@ -1,22 +1,41 @@
 #!/bin/bash
 
-# Usage: ./run_humanoid_workstation.sh [JOB_INDEX]
+# Usage: ./run_humanoid_workstation.sh [JOB_INDEX] [USE_MPS: true/false] [PERCENT: 1-100]
+# Example: ./run_humanoid_workstation.sh 0 true 80
 JOB_INDEX=${1:-0}
+USE_MPS=${2:-false}      # New Flag: true or false
+GPU_PERCENT=${3:-100}    # New Flag: Percentage of GPU compute
+
+# ==============================================================================
+# 0. GPU ALLOCATION LOGIC (NVIDIA MPS)
+# ==============================================================================
+if [ "$USE_MPS" = "true" ]; then
+    echo "⚙️ Initializing GPU Resource Allocation..."
+    # 1. Set GPU to exclusive mode (required for MPS)
+    sudo nvidia-smi -i 0 -c EXCLUSIVE_PROCESS > /dev/null 2>&1
+    
+    # 2. Start the MPS daemon if it's not already running
+    # We use a subshell to check and start to avoid errors
+    ps -C nvidia-cuda-mps-control > /dev/null || nvidia-cuda-mps-control -d
+    
+    # 3. Set the active thread percentage for THIS specific process
+    export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=$GPU_PERCENT
+    echo "✅ GPU Compute capped at ${GPU_PERCENT}% for this job."
+else
+    echo "⚠️ Running without specific GPU compute limits."
+fi
 
 # ==============================================================================
 # 1. PARAMETER SELECTION
 # ==============================================================================
 SEEDS=(40004 10001 20002 50005)
 TASKS=(2 3 5)
-
-ALPHAS=(0.2)        # ME_AM_ALPHA
-TEMPS=(0.8)         # INV_TEMP
-TAU_SCORES=(0.001)  # TAU_SCORE
-
+ALPHAS=(0.2)         # ME_AM_ALPHA
+TEMPS=(0.8)          # INV_TEMP
+TAU_SCORES=(0.001)   # TAU_SCORE
 TAU_CRITICS=(5.0)   
-MIXTURES=(0.0)      # MIXTURE_PROB
+MIXTURES=(0.0)       # MIXTURE_PROB
 DISCOUNTS=(0.995)   
-
 SCORE_MODES=("fast")
 HIDDEN_DIMS=("[512,512,512,512]")
 
@@ -41,7 +60,7 @@ SCORE_MODE=${SCORE_MODES[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * N
 CURRENT_DIMS=${HIDDEN_DIMS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES)) % NUM_DIMS ))]}
 TAU_CRITIC=${TAU_CRITICS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES * NUM_DIMS)) % NUM_TAU_CRITICS ))]}
 TAU_SCORE=${TAU_SCORES[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES * NUM_DIMS * NUM_TAU_CRITICS)) % NUM_TAU_SCORES ))]}
-DISCOUNT=${DISCOUNTS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES * NUM_DIMS * NUM_TAU_CRITICS * NUM_TAU_SCORES)) % NUM_DISCOUNTS ))]}
+DISCOUNT=${DISCOUNTS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES * NUM_DIMS * NUM_TAU_CRITICS * NUM_TAU_SCORE)) % NUM_DISCOUNTS ))]}
 
 DIMS_TAG=$(echo $CURRENT_DIMS | tr -d '[],')
 
@@ -73,14 +92,11 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # 3. PATHS & TRAINING
 # ==============================================================================
 PROJECT_DIR="$(pwd)"
-
-# WORKSTATION ARMOR: Pointing to the physical RAM disk
 SOURCE_DATASET_DIR="$HOME/abdelghani_work/datasets/humanoidmaze-large"
 DATASET_DIR="/dev/shm/humanoidmaze-large" 
 
-# Ensure the dataset is actually in RAM before starting
 if [ ! -d "$DATASET_DIR" ]; then
-    echo "Loading dataset into RAM disk from $SOURCE_DATASET_DIR..."
+    echo "Loading dataset into RAM disk..."
     cp -r "$SOURCE_DATASET_DIR" /dev/shm/
 fi
 
@@ -93,7 +109,6 @@ export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MO
 
 echo "🚀 Starting Workstation Training with NUMA Pinning..."
 
-# CLOUD ARMOR: taskset -c 0-31 locks the CPU threads to Socket 0 (Adjust if < 32 cores local)
 taskset -c 0-31 "$PYTHON_EXEC" main.py \
     --run_group=humanoidmaze-large_Workstation_Repro \
     --agent=agents/meam.py \

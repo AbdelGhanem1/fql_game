@@ -7,20 +7,20 @@ JOB_INDEX=${1:-0}
 # 1. PARAMETER SELECTION FOR CUBE-TRIPLE PROXY TUNING
 # ==============================================================================
 # Tasks 2 and 4 represent the domain difficulty (Proxy tuning method)
-TASKS=(1 5)
+TASKS=(1 3)
 SEEDS=(10001 20002 30003 40004)
 
 # --- THE PAIRED COMBINATIONS (Alpha + Temp = 1.0) ---
 # We will use the same index to access both arrays so they stay locked together.
 # Pair 0: Alpha=0.1, Temp=0.9
 # Pair 1: Alpha=0.3, Temp=0.7
-ALPHAS=(0.1)
-TEMPS=(0.9)
+ALPHAS=(0.3)
+TEMPS=(0.7)
 
 MIXTURES=(0.0)
 
-# Since Denominator = 1, TAU_CRITIC acts directly. 3.0 matches QAM baseline exactly.
-TAU_CRITICS=(3.0)
+
+TAU_CRITICS=(5.0)
 
 # Slightly elevated from puzzle to encourage manifold exploration
 TAU_SCORES=(0.001)
@@ -77,6 +77,7 @@ echo "=========================================="
 # ==============================================================================
 # 2. ENVIRONMENT SETUP
 # ==============================================================================
+
 CONDA_ENV="$HOME/micromamba/envs/fql_env"
 SITE_PACKAGES="$CONDA_ENV/lib/python3.10/site-packages"
 PYTHON_EXEC="$CONDA_ENV/bin/python"
@@ -101,12 +102,12 @@ cd "$PROJECT_DIR"
 mkdir -p logs saved_models
 
 # WandB Config - Renamed for Cube-Triple proxy tuning
-export WANDB_PROJECT="meam-cube-proxy-tuning_more_tests"
+export WANDB_PROJECT="cube_tripple_v1"
 export WANDB_NAME="tk${TASK_ID}_a${ME_AM_ALPHA}_t${INV_TEMP}_m${MIXTURE_PROB}_tC${TAU_CRITIC}_tS${TAU_SCORE}_s${SEED}"
 
 echo "🚀 Starting Training..."
 
-#rm -f /dev/shm/meam_worker_*.npz
+rm -f /dev/shm/meam_worker_*.npz
 
 "$PYTHON_EXEC" main.py \
     --run_group=cube-triple_Proxy_Tune \
