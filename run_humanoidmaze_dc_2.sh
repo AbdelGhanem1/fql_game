@@ -85,7 +85,7 @@ mkdir -p /models/logs /models/saved_models
 
 export WANDB_MODE="offline"
 
-export WANDB_PROJECT="humanoidmaze-large_mirror_descent_10_sweep_v2"
+export WANDB_PROJECT="humanoidmaze-large_mirror_descent_5_sweep_v2"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
 echo "🚀 Starting Cloud Training with NUMA Pinning..."
