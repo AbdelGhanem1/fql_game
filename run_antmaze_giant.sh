@@ -8,7 +8,7 @@ JOB_INDEX=${1:-0}
 # ==============================================================================
 SEEDS=(40004 10001 20002 50005)
 # Antmaze typically evaluates across tasks 1 through 5
-TASKS=(2 4)
+TASKS=(1)
 
 # --- QAM VANILLA LOCK ---
 ALPHAS=(0.2)        # ME_AM_ALPHA
@@ -16,7 +16,7 @@ TEMPS=(0.8)         # INV_TEMP
 TAU_SCORES=(0.001)    # TAU_SCORE
 
 # --- DOMAIN SPECIFIC: antmaze-giant ---
-TAU_CRITICS=(5.0 3.0)   
+TAU_CRITICS=(5.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
 DISCOUNTS=(0.995)   # CRITICAL: Long-horizon discount factor
 
@@ -113,7 +113,7 @@ echo "🚀 Starting Training..."
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
     --agent.score_sigma_min=1e-4\
     --offline_steps=1000000 \
-    --online_steps=0 \
+    --online_steps=500000 \
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \

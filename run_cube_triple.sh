@@ -7,23 +7,23 @@ JOB_INDEX=${1:-0}
 # 1. PARAMETER SELECTION FOR CUBE-TRIPLE PROXY TUNING
 # ==============================================================================
 # Tasks 2 and 4 represent the domain difficulty (Proxy tuning method)
-TASKS=(1 3)
-SEEDS=(10001 20002 30003 40004)
+TASKS=(2 5)
+SEEDS=(10001 20002 30003)
 
 # --- THE PAIRED COMBINATIONS (Alpha + Temp = 1.0) ---
 # We will use the same index to access both arrays so they stay locked together.
 # Pair 0: Alpha=0.1, Temp=0.9
 # Pair 1: Alpha=0.3, Temp=0.7
-ALPHAS=(0.4)
-TEMPS=(0.6)
+ALPHAS=(0.0)
+TEMPS=(1.0)
 
-MIXTURES=(0.0)
+MIXTURES=(0.1)
 
 
-TAU_CRITICS=(5.0)
+TAU_CRITICS=(15.0)
 
 # Slightly elevated from puzzle to encourage manifold exploration
-TAU_SCORES=(0.001)
+TAU_SCORES=(1.0)
 
 SCORE_MODES=("fast")
 HIDDEN_DIMS=("[512,512,512,512]")
@@ -102,8 +102,8 @@ cd "$PROJECT_DIR"
 mkdir -p logs saved_models
 
 # WandB Config - Renamed for Cube-Triple proxy tuning
-export WANDB_PROJECT="cube_tripple_v1"
-export WANDB_NAME="tk${TASK_ID}_a${ME_AM_ALPHA}_t${INV_TEMP}_m${MIXTURE_PROB}_tC${TAU_CRITIC}_tS${TAU_SCORE}_s${SEED}"
+export WANDB_PROJECT="cube_tripple_v2"
+export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
 echo "🚀 Starting Training..."
 
@@ -129,8 +129,8 @@ rm -f /dev/shm/meam_worker_*.npz
     --agent.batch_size=256 \
     --agent.score_mode=${SCORE_MODE} \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
-    --agent.use_gaussian_mode=False\
-    --agent.score_sigma_min=1e-4\
+    --agent.use_gaussian_mode=True\
+    --agent.score_sigma_min=3e-1\
     --offline_steps=1000000 \
     --online_steps=0 \
     --eval_interval=50000 \
