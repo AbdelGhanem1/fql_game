@@ -1,24 +1,21 @@
 #!/bin/bash
 
-# Usage: ./run.sh [JOB_INDEX]
+# Usage: ./run_docker.sh [JOB_INDEX]
 JOB_INDEX=${1:-0}
 
 # ==============================================================================
 # 1. PARAMETER SELECTION
 # ==============================================================================
-SEEDS=(40004 10001 20002 50005 80008 70007 60006 30003)
-# Antmaze typically evaluates across tasks 1 through 5
-TASKS=(2 5 3)
+SEEDS=(40004 10001 20002 50005 60006 80008 70007 30003)
+TASKS=(4 1 3 2 5)
 
-# --- QAM VANILLA LOCK ---
-ALPHAS=(0.0)        # ME_AM_ALPHA
-TEMPS=(1.0)         # INV_TEMP
-TAU_SCORES=(0.0)    # TAU_SCORE
+ALPHAS=(0.3)        # ME_AM_ALPHA
+TEMPS=(0.7)         # INV_TEMP
+TAU_SCORES=(0.001)  # TAU_SCORE
 
-# --- DOMAIN SPECIFIC: antmaze-giant ---
-TAU_CRITICS=(5.0)   
+TAU_CRITICS=(10.0)   
 MIXTURES=(0.0)      # MIXTURE_PROB
-DISCOUNTS=(0.995)   # CRITICAL: Long-horizon discount factor
+DISCOUNTS=(0.995)   
 
 SCORE_MODES=("fast")
 HIDDEN_DIMS=("[512,512,512,512]")
@@ -34,12 +31,9 @@ NUM_DISCOUNTS=${#DISCOUNTS[@]}
 NUM_MODES=${#SCORE_MODES[@]}
 NUM_DIMS=${#HIDDEN_DIMS[@]}
 
-# ==============================================================================
-# Indexing Logic (Fully Generalized)
-# ==============================================================================
+# Indexing Logic
 TASK_ID=${TASKS[$(( JOB_INDEX % NUM_TASKS ))]}
 SEED=${SEEDS[$(( (JOB_INDEX / NUM_TASKS) % NUM_SEEDS ))]}
-
 INV_TEMP=${TEMPS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS)) % NUM_TEMPS ))]}
 ME_AM_ALPHA=${ALPHAS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS)) % NUM_ALPHAS ))]}
 MIXTURE_PROB=${MIXTURES[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS)) % NUM_MIXTURES ))]}
@@ -49,20 +43,17 @@ TAU_CRITIC=${TAU_CRITICS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * N
 TAU_SCORE=${TAU_SCORES[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES * NUM_DIMS * NUM_TAU_CRITICS)) % NUM_TAU_SCORES ))]}
 DISCOUNT=${DISCOUNTS[$(( (JOB_INDEX / (NUM_TASKS * NUM_SEEDS * NUM_TEMPS * NUM_ALPHAS * NUM_MIXTURES * NUM_MODES * NUM_DIMS * NUM_TAU_CRITICS * NUM_TAU_SCORES)) % NUM_DISCOUNTS ))]}
 
-# Create a "clean" version of dims for filenames (removing brackets/commas)
 DIMS_TAG=$(echo $CURRENT_DIMS | tr -d '[],')
 
 echo "=========================================="
-echo "Workstation Job Index: $JOB_INDEX"
-echo "Config: Antmaze-Giant Task=$TASK_ID | Seed=$SEED | Mode=$SCORE_MODE | Dims=$DIMS_TAG"
-echo "Params: Gamma=$DISCOUNT | Alpha=$ME_AM_ALPHA | Temp=$INV_TEMP"
-echo "ME-AM Tuning: Mix=$MIXTURE_PROB | TauC=$TAU_CRITIC | TauS=$TAU_SCORE"
+echo "Cloud-Hardened Job Index: $JOB_INDEX"
+echo "Config: Humanoidmaze-Large Task=$TASK_ID | Seed=$SEED | Mode=$SCORE_MODE | Dims=$DIMS_TAG"
 echo "=========================================="
 
 # ==============================================================================
-# 2. ENVIRONMENT SETUP
+# 2. DOCKER ENVIRONMENT SETUP
 # ==============================================================================
-CONDA_ENV="$HOME/micromamba/envs/fql_env"
+CONDA_ENV="/opt/conda/envs/fql_env"
 SITE_PACKAGES="$CONDA_ENV/lib/python3.10/site-packages"
 PYTHON_EXEC="$CONDA_ENV/bin/python"
 
@@ -74,27 +65,37 @@ export JAX_DEFAULT_MATMUL_PRECISION=tensorfloat32
 export MUJOCO_GL="egl"
 export PYOPENGL_PLATFORM="egl"
 export JAX_ENABLE_X64=False
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # ==============================================================================
 # 3. PATHS & TRAINING
 # ==============================================================================
-PROJECT_DIR="$(pwd)"
-DATASET_DIR="$HOME/abdelghani_work/datasets/antmaze-giant" # Ensure this path is correct
+PROJECT_DIR="/models/fql_game"
+
+# CLOUD ARMOR: Pointing to the physical RAM disk
+DATASET_DIR="/dev/shm/humanoidmaze-large" 
+
+# CLOUD ARMOR: Ensure the dataset is actually in RAM before starting
+if [ ! -d "$DATASET_DIR" ]; then
+    echo "Loading dataset into RAM disk..."
+    cp -r /workspace/datasets/humanoidmaze-large /dev/shm/
+fi
 
 cd "$PROJECT_DIR"
-mkdir -p logs saved_models
+mkdir -p /models/logs /models/saved_models
 
-export WANDB_PROJECT="qam_antmaze_giant"
+export WANDB_MODE="offline"
+
+export WANDB_PROJECT="humanoidmaze-large_mirror_descent_10_sweep_v2"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
-echo "🚀 Starting Training..."
+echo "🚀 Starting Cloud Training with NUMA Pinning..."
 
-"$PYTHON_EXEC" main.py \
-    --run_group=antmaze-giant_Workstation_Repro \
+# CLOUD ARMOR: taskset -c 0-31 locks the CPU threads to Socket 0
+taskset -c 0-31 "$PYTHON_EXEC" main.py \
+    --run_group=humanoidmaze-large_Docker_Repro \
     --agent=agents/meam.py \
     --seed=${SEED} \
-    --env_name=antmaze-giant-navigate-singletask-task${TASK_ID}-v0 \
+    --env_name=humanoidmaze-large-navigate-singletask-task${TASK_ID}-v0 \
     --ogbench_dataset_dir="${DATASET_DIR}" \
     --sparse=False \
     --horizon_length=5 \
@@ -107,14 +108,14 @@ echo "🚀 Starting Training..."
     --agent.tau_critic=${TAU_CRITIC} \
     --agent.tau_score=${TAU_SCORE} \
     --agent.num_qs=10 \
-    --agent.rho=0.5 \
+    --agent.rho=0.0 \
     --agent.batch_size=256 \
     --agent.score_mode=${SCORE_MODE} \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
-    --agent.score_sigma_min=1e-4\
+    --agent.score_sigma_min=1e-4 \
     --offline_steps=1000000 \
     --online_steps=0 \
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \
-    --save_dir="./saved_models/job_${JOB_INDEX}_antmaze_giant_task${TASK_ID}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_mix${MIXTURE_PROB}"
+    --save_dir="/models/saved_models/job_${JOB_INDEX}_humanoidmaze_large_task${TASK_ID}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_mix${MIXTURE_PROB}"

@@ -7,9 +7,9 @@ JOB_INDEX=${1:-0}
 # 1. PARAMETER SELECTION
 # ==============================================================================
 SEEDS=(40004 10001 20002 50005)
-ALPHAS=(0.0)
-MIXTURES=(0.1 0.5)
-TEMPS=(1.0)
+ALPHAS=(0.2)
+MIXTURES=(0.2)
+TEMPS=(0.8)
 TASKS=(4 2)
 SCORE_MODES=("fast")
 # Quoted strings to preserve brackets/commas
@@ -17,7 +17,7 @@ HIDDEN_DIMS=("[512,512,512,512]")
 
 # NEW PARAMETERS
 TAU_CRITICS=(5.0)
-TAU_SCORES=(1.0)
+TAU_SCORES=(0.001)
 
 NUM_SEEDS=${#SEEDS[@]}
 NUM_ALPHAS=${#ALPHAS[@]}
@@ -117,7 +117,7 @@ if [ -f "$DATASET_DIR/puzzle-4x4-play-v0-000.npz" ]; then
 fi
 
 # WandB Config - Updated to include TauCritic and TauScore
-export WANDB_PROJECT="puzzle_4by4_geometric_expansion_corrected"
+export WANDB_PROJECT="puzzle_4by4_smaller sigma min with MD"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
 echo "🚀 Starting Training..."
@@ -142,6 +142,7 @@ rm -f /dev/shm/meam_worker_*.npz
     --agent.num_qs=10 \
     --agent.rho=0.5 \
     --agent.batch_size=256 \
+    --agent.score_sigma_min=1e-4\
     --agent.score_mode=${SCORE_MODE} \
     --agent.score_net_hidden_dims=${CURRENT_DIMS} \
     --offline_steps=1000000 \
