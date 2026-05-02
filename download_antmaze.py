@@ -3,6 +3,10 @@ import ogbench
 import subprocess
 import os
 
+# Set the persistent path for RunPod
+DATASET_ROOT = "/workspace/datasets"
+os.environ["OGBENCH_DATASET_DIR"] = DATASET_ROOT
+
 original_urlretrieve = urllib.request.urlretrieve
 
 def fast_urlretrieve(url, filename, reporthook=None, data=None):
@@ -11,22 +15,22 @@ def fast_urlretrieve(url, filename, reporthook=None, data=None):
     
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     
-    # STEALTH SETTINGS: 4 connections, 10M chunks, auto-resume
+    # aria2c settings for maximum speed on cloud backbone
     cmd = [
         "aria2c", 
-        "-x", "4", 
-        "-s", "4", 
-        "--max-connection-per-server=4",
-        "--min-split-size=10M",
+        "-x", "16",           # Increased connections for cloud network
+        "-s", "16", 
+        "--max-connection-per-server=16",
+        "--min-split-size=5M",
         "--continue=true",
-        "--split=4",
+        "--split=16",
         "--file-allocation=none",
         "-d", os.path.dirname(filename),
         "-o", os.path.basename(filename),
         url
     ]
     
-    print(f"⚡ Running stealth download to bypass firewall throttling...")
+    print(f"⚡ Running accelerated cloud download...")
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
@@ -37,6 +41,6 @@ def fast_urlretrieve(url, filename, reporthook=None, data=None):
 
 urllib.request.urlretrieve = fast_urlretrieve
 
-print("Fetching metadata and starting download...")
-# FIXED: Targeting 'humanoidmaze-large-navigate-v0' which pulls both train and val splits
-ogbench.download_datasets(['cube-quadruple-v0'])
+print("Starting Antmaze-Giant Download...")
+# This pulls the default navigate dataset used in the QAM paper[cite: 1]
+ogbench.download_datasets(['antmaze-giant-navigate-v0'])
