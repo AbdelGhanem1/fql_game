@@ -17,7 +17,7 @@ TAU_SCORES=(0.0)    # TAU_SCORE
 
 # --- DOMAIN SPECIFIC: antmaze-giant ---
 TAU_CRITICS=(5.0)   
-MIXTURES=(0.0)      # MIXTURE_PROB
+MIXTURES=(0.3)      # MIXTURE_PROB
 DISCOUNTS=(0.995)   # CRITICAL: Long-horizon discount factor
 
 SCORE_MODES=("fast")
@@ -97,7 +97,7 @@ echo "🚀 Starting Training..."
     --env_name=antmaze-giant-navigate-singletask-task${TASK_ID}-v0 \
     --ogbench_dataset_dir="${DATASET_DIR}" \
     --sparse=False \
-    --horizon_length=5 \
+    --horizon_length=1\
     --agent.action_chunking=False \
     --balanced_sampling=False \
     --agent.discount=${DISCOUNT} \
