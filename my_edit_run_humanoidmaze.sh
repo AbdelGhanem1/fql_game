@@ -6,7 +6,7 @@ JOB_INDEX=${1:-0}
 # ==============================================================================
 # 1. PARAMETER SELECTION
 # ==============================================================================
-SEEDS=(80008 70007 60006 30003 10001 20002 50005)
+SEEDS=(10001 70007 60006 30003 10001 20002 50005)
 TASKS=(1)
 
 ALPHAS=(0.2)        
@@ -77,7 +77,7 @@ DATASET_DIR="$HOME/abdelghani_work/datasets/humanoidmaze-large"
 cd "$PROJECT_DIR"
 mkdir -p logs saved_models
 
-export WANDB_PROJECT="onlinefinetuning_HM"
+export WANDB_PROJECT="HM_geometric_expansion"
 export WANDB_NAME="task${TASK_ID}_tmp${INV_TEMP}_mprob${MIXTURE_PROB}_${SCORE_MODE}_dims${DIMS_TAG}_alpha${ME_AM_ALPHA}_tauC${TAU_CRITIC}_tauS${TAU_SCORE}_seed${SEED}"
 
 echo "🚀 Starting Training..."
@@ -85,7 +85,7 @@ rm -f /dev/shm/meam_worker_*.npz
 
 "$PYTHON_EXEC" main.py \
     --run_group=humanoidmaze-large_Workstation_Repro \
-    --agent=agents/meam.py \
+    --agent=agents/meam_edit.py \
     --seed=${SEED} \
     --env_name=humanoidmaze-large-navigate-singletask-task${TASK_ID}-v0 \
     --ogbench_dataset_dir="${DATASET_DIR}" \
@@ -113,7 +113,7 @@ rm -f /dev/shm/meam_worker_*.npz
     --agent.use_gaussian_mode=True \
     --agent.clip_q_grad=False \
     --offline_steps=1000000 \
-    --online_steps=500000 \
+    --online_steps=0 \
     --eval_interval=50000 \
     --save_interval=500000 \
     --dataset_replace_interval=2000000 \

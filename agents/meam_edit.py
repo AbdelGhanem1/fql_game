@@ -262,6 +262,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
                 actions_mix = batch_actions[:num_mix]
                 
                 # Option A: Learnable Maximized Target Noise
+
                 if self.config.get("target_noise_scale", 0.0) > 0.0:
                     is_edit = self.config.get("augment_as_edit", True)
                     
@@ -281,8 +282,13 @@ class MEAMAgent(flax.struct.PyTreeNode):
                     target_noise_sample = target_noise_dist.sample(seed=target_noise_rng)
                     scaled_stochastic_noise = target_noise_sample * self.config["target_noise_scale"]
                     
+                    # --- RESTORED BEHAVIOR: Add residual if is_edit ---
+                    if is_edit:
+                        raw_stochastic_actions = actions_mix + scaled_stochastic_noise
+                    else:
+                        raw_stochastic_actions = scaled_stochastic_noise
 
-                    stochastic_actions = jnp.clip(scaled_stochastic_noise, -1.0, 1.0)
+                    stochastic_actions = jnp.clip(raw_stochastic_actions, -1.0, 1.0)
                     
                     # Evaluate critic of the stochastic samples to train the generator
                     critic_stochastic = self.network.select('critic')(obs_mix, actions=stochastic_actions)
@@ -292,7 +298,7 @@ class MEAMAgent(flax.struct.PyTreeNode):
                     info["target_noise_critic_loss"] = target_noise_critic_loss
                     info["diag_target_noise_critic_mean"] = jnp.mean(critic_stochastic, axis=0).mean()
                     
-                    # --- NEW FLAG FOR ENTROPY REGULARIZATION ---
+                    # --- FLAG FOR ENTROPY REGULARIZATION ---
                     if self.config.get("use_target_noise_entropy", True):
                         target_noise_log_probs = target_noise_dist.log_prob(target_noise_sample)
                         target_alpha = self.network.select('target_noise_alpha')(params=grad_params)
@@ -315,8 +321,13 @@ class MEAMAgent(flax.struct.PyTreeNode):
                     else:
                         selected_noise = scaled_stochastic_noise
 
-                    augmented_actions_mix = jnp.clip(selected_noise, -1.0, 1.0)
-                    raw_augmented_actions = selected_noise
+                    # --- RESTORED BEHAVIOR: Add residual if is_edit ---
+                    if is_edit:
+                        raw_augmented_actions = actions_mix + selected_noise
+                    else:
+                        raw_augmented_actions = selected_noise
+
+                    augmented_actions_mix = jnp.clip(raw_augmented_actions, -1.0, 1.0)
                     
                     # Stop gradient so the downstream flow model doesn't backprop into the noise generator
                     augmented_actions_mix = jax.lax.stop_gradient(augmented_actions_mix)
@@ -852,7 +863,7 @@ def get_config():
             target_noise_scale=0.1,                  # Set > 0.0 to enable the learnable target generator
             use_gaussian_mode=True,
             target_noise_target_entropy=ml_collections.config_dict.placeholder(float),
-            target_noise_target_entropy_multiplier=0.0,
+            target_noise_target_entropy_multiplier=0.5,
             augment_as_edit=True,
             use_target_noise_entropy=True,
             
