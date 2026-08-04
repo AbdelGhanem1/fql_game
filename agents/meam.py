@@ -849,7 +849,7 @@ def get_config():
             target_best_of_n=10,
             
             # Target Noise (Learnable Q-Maximized Targets)
-            target_noise_scale=0.1,                  # Set > 0.0 to enable the learnable target generator
+            target_noise_scale=1.0,                  # Set > 0.0 to enable the learnable target generator
             use_gaussian_mode=True,
             target_noise_target_entropy=ml_collections.config_dict.placeholder(float),
             target_noise_target_entropy_multiplier=0.0,

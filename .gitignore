@@ -1,12 +1,26 @@
+# Python
 __pycache__/
-.vscode/
-dist/
 *.py[cod]
-*$py.class
-*.egg-info/
-.DS_Store
-.idea/
-.ruff_cache/
-exp/
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Experiment outputs
+logs/
 saved_models/
 wandb/
+exp_data/
+*.out
+*.err
+MUJOCO_LOG.TXT
+old_stuff/
+
+# Local environments and editors
+.env
+.venv/
+venv/
+.idea/
+.vscode/
+
+# OS
+.DS_Store

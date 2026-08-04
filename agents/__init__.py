@@ -11,6 +11,7 @@ from agents.fawac import FAWACAgent
 from agents.rebrac import ReBRACAgent
 from agents.ifql import IFQLAgent
 from agents.meam import MEAMAgent
+from agents.meam_geo import MEAMGeoAgent
 
 agents = dict(
     ifql=IFQLAgent,
@@ -26,4 +27,5 @@ agents = dict(
     rebrac=ReBRACAgent,
     dcgql=DCGQLAgent,
     meam=MEAMAgent,
+    meam_geo=MEAMGeoAgent,
 )
